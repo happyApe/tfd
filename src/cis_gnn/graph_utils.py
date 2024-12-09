@@ -1,16 +1,12 @@
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Tuple
 
 import dgl
 import numpy as np
 import pandas as pd
 import torch
-from scipy.sparse import csr_matrix
-from sklearn.preprocessing import StandardScaler
-
-logger = logging.getLogger(__name__)
+from utils import get_logger
 
 
 def get_features(id_to_node, node_features):
@@ -23,6 +19,8 @@ def get_features(id_to_node, node_features):
 
     Returns:
         tuple: (feature matrix, list of new nodes)
+            - np.ndarray: Node feature matrix in order
+            - list: New nodes not yet in the graph
     """
     indices, features, new_nodes = [], [], []
     max_node = max(id_to_node.values())
@@ -46,15 +44,6 @@ def get_features(id_to_node, node_features):
     return features, new_nodes
 
 
-def get_edgelists(edgelist_expression, directory):
-    """Get edge list files matching expression pattern."""
-    if "," in edgelist_expression:
-        return edgelist_expression.split(",")
-    files = os.listdir(directory)
-    compiled_expression = re.compile(edgelist_expression)
-    return [filename for filename in files if compiled_expression.match(filename)]
-
-
 def get_labels(
     id_to_node,
     n_nodes,
@@ -63,7 +52,23 @@ def get_labels(
     masked_nodes_path,
     additional_mask_rate=0,
 ):
-    """Get node labels and masks."""
+    """
+    Get node labels and masks for training/testing.
+
+    Args:
+        id_to_node (dict): Dictionary mapping node names to dgl node idx
+        n_nodes (int): Number of nodes in the graph
+        target_node_type (str): Column name for target node type
+        labels_path (str): Path to file containing labeled nodes
+        masked_nodes_path (str): Path to file containing nodes to mask
+        additional_mask_rate (float): Additional masking rate for training nodes
+
+    Returns:
+        tuple: (labels, train_mask, test_mask)
+            - np.ndarray: Node labels
+            - np.ndarray: Training mask
+            - np.ndarray: Testing mask
+    """
     node_to_id = {v: k for k, v in id_to_node.items()}
     user_to_label = pd.read_csv(labels_path).set_index(target_node_type)
     labels = user_to_label.loc[
@@ -106,10 +111,39 @@ def _get_mask(id_to_node, node_to_id, num_nodes, masked_nodes, additional_mask_r
     return train_mask, test_mask
 
 
+def _get_node_idx(id_to_node, node_type, node_id, ptr):
+    """Get or create node index for a given node."""
+    if node_type in id_to_node:
+        if node_id in id_to_node[node_type]:
+            node_idx = id_to_node[node_type][node_id]
+        else:
+            id_to_node[node_type][node_id] = ptr
+            node_idx = ptr
+            ptr += 1
+    else:
+        id_to_node[node_type] = {}
+        id_to_node[node_type][node_id] = ptr
+        node_idx = ptr
+        ptr += 1
+    return node_idx, id_to_node, ptr
+
+
 def parse_edgelist(
     edges, id_to_node, header=False, source_type="user", sink_type="user"
 ):
-    """Parse edge list file and create graph edges."""
+    """
+    Parse edge list file and create graph edges.
+
+    Args:
+        edges (str): Path to comma separated edge list file
+        id_to_node (dict): Node ID to index mapping
+        header (bool): Whether file has header
+        source_type (str): Source node type
+        sink_type (str): Sink node type
+
+    Returns:
+        tuple: (edge_list, rev_edge_list, id_to_node, source_type, sink_type)
+    """
     edge_list = []
     rev_edge_list = []
     source_pointer = sink_pointer = 0
@@ -146,25 +180,28 @@ def parse_edgelist(
     return edge_list, rev_edge_list, id_to_node, source_type, sink_type
 
 
-def _get_node_idx(id_to_node, node_type, node_id, ptr):
-    """Get or create node index for a given node."""
-    if node_type in id_to_node:
-        if node_id in id_to_node[node_type]:
-            node_idx = id_to_node[node_type][node_id]
-        else:
-            id_to_node[node_type][node_id] = ptr
-            node_idx = ptr
-            ptr += 1
-    else:
-        id_to_node[node_type] = {}
-        id_to_node[node_type][node_id] = ptr
-        node_idx = ptr
-        ptr += 1
-    return node_idx, id_to_node, ptr
+def get_edgelists(edgelist_expression, directory):
+    """Get edge list files matching expression pattern."""
+    if "," in edgelist_expression:
+        return edgelist_expression.split(",")
+    files = os.listdir(directory)
+    compiled_expression = re.compile(edgelist_expression)
+    return [filename for filename in files if compiled_expression.match(filename)]
 
 
 def construct_graph(training_dir, edges, nodes, target_node_type):
-    """Construct heterogeneous graph from edge lists and features."""
+    """
+    Construct heterogeneous graph from edge lists and features.
+
+    Args:
+        training_dir (str): Directory containing training data
+        edges (list): List of edge list files
+        nodes (str): Node features file
+        target_node_type (str): Target node type
+
+    Returns:
+        tuple: (graph, features, target_id_to_node, id_to_node)
+    """
     print(f"Getting relation graphs from edge lists: {edges}")
     edgelists, id_to_node = {}, {}
 
@@ -211,3 +248,7 @@ def construct_graph(training_dir, edges, nodes, target_node_type):
     del id_to_node[target_node_type]
 
     return g, features, target_id_to_node, id_to_node
+
+
+# Set up module logger
+logging = get_logger(__name__)

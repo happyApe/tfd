@@ -4,113 +4,58 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class AttentionLayer(nn.Module):
-    """Multi-head attention layer for heterogeneous graphs."""
-
-    def __init__(self, in_size, out_size, num_heads=4, dropout=0.2):
-        super().__init__()
-        self.num_heads = num_heads
-        self.out_size = out_size
-        head_size = out_size // num_heads
-        assert (
-            head_size * num_heads == out_size
-        ), "out_size must be divisible by num_heads"
-
-        self.key = nn.Linear(in_size, out_size)
-        self.query = nn.Linear(in_size, out_size)
-        self.value = nn.Linear(in_size, out_size)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, h):
-        k = self.key(h).view(-1, self.num_heads, self.out_size // self.num_heads)
-        q = self.query(h).view(-1, self.num_heads, self.out_size // self.num_heads)
-        v = self.value(h).view(-1, self.num_heads, self.out_size // self.num_heads)
-
-        # Scaled dot-product attention
-        attn = torch.bmm(q, k.transpose(1, 2)) / np.sqrt(
-            self.out_size // self.num_heads
-        )
-        attn = F.softmax(attn, dim=2)
-        attn = self.dropout(attn)
-
-        out = torch.bmm(attn, v)
-        return out.view(-1, self.out_size)
-
-
 class HeteroRGCNLayer(nn.Module):
-    """Improved heterogeneous GCN layer with attention and residual connections."""
+    """
+    Heterogeneous GCN layer that handles multiple relation types.
+    """
 
-    def __init__(
-        self, in_size, out_size, etypes, num_heads=4, dropout=0.2, use_attention=True
-    ):
-        super().__init__()
-        self.in_size = in_size
-        self.out_size = out_size
-        self.use_attention = use_attention
-
-        # Transform weights for each relation
+    def __init__(self, in_size, out_size, etypes):
+        """
+        Args:
+            in_size (int): Input feature size
+            out_size (int): Output feature size
+            etypes (list): List of edge types in the graph
+        """
+        super(HeteroRGCNLayer, self).__init__()
+        # Create linear transformation for each relation
         self.weight = nn.ModuleDict(
             {name: nn.Linear(in_size, out_size) for name in etypes}
         )
 
-        # Attention layers
-        if use_attention:
-            self.attention = nn.ModuleDict(
-                {
-                    name: AttentionLayer(out_size, out_size, num_heads, dropout)
-                    for name in etypes
-                }
-            )
-
-        # Layer normalization and dropout
-        self.layer_norm = nn.LayerNorm(out_size)
-        self.dropout = nn.Dropout(dropout)
-
-        # Residual connection transform if needed
-        self.residual = nn.Linear(in_size, out_size) if in_size != out_size else None
-
     def forward(self, G, feat_dict):
+        """
+        Args:
+            G (DGLGraph): The graph
+            feat_dict (dict): Node features for each node type
+
+        Returns:
+            dict: Updated node features
+        """
         funcs = {}
         for srctype, etype, dsttype in G.canonical_etypes:
             if srctype in feat_dict:
                 # Transform features
                 Wh = self.weight[etype](feat_dict[srctype])
-
-                # Apply attention if enabled
-                if self.use_attention:
-                    Wh = self.attention[etype](Wh)
-
                 # Store in graph for message passing
                 G.nodes[srctype].data[f"Wh_{etype}"] = Wh
+                # Define message and reduce functions
                 funcs[etype] = (fn.copy_u(f"Wh_{etype}", "m"), fn.mean("m", "h"))
 
-        # Message passing
+        # Perform message passing
         G.multi_update_all(funcs, "sum")
 
-        # Get updated features
-        out_dict = {}
-        for ntype in G.ntypes:
-            if "h" in G.nodes[ntype].data:
-                # Get node features
-                h = G.nodes[ntype].data["h"]
-
-                # Apply residual connection if possible
-                if self.residual is not None and ntype in feat_dict:
-                    h = h + self.residual(feat_dict[ntype])
-                elif ntype in feat_dict and h.shape == feat_dict[ntype].shape:
-                    h = h + feat_dict[ntype]
-
-                # Apply normalization and dropout
-                h = self.layer_norm(h)
-                h = self.dropout(h)
-
-                out_dict[ntype] = h
-
-        return out_dict
+        # Return updated features
+        return {
+            ntype: G.nodes[ntype].data["h"]
+            for ntype in G.ntypes
+            if "h" in G.nodes[ntype].data
+        }
 
 
 class HeteroRGCN(nn.Module):
-    """Improved heterogeneous GCN with attention and skip connections."""
+    """
+    Heterogeneous Graph Convolutional Network.
+    """
 
     def __init__(
         self,
@@ -121,11 +66,18 @@ class HeteroRGCN(nn.Module):
         out_size,
         n_layers,
         embedding_size,
-        num_heads=4,
-        dropout=0.2,
-        use_attention=True,
     ):
-        super().__init__()
+        """
+        Args:
+            ntype_dict (dict): Number of nodes for each node type
+            etypes (list): Edge types in the graph
+            in_size (int): Input feature size
+            hidden_size (int): Hidden layer size
+            out_size (int): Output size (num classes)
+            n_layers (int): Number of RGCN layers
+            embedding_size (int): Size of learned node embeddings
+        """
+        super(HeteroRGCN, self).__init__()
 
         # Create trainable embeddings for non-target nodes
         self.embed = nn.ParameterDict(
@@ -136,68 +88,39 @@ class HeteroRGCN(nn.Module):
             }
         )
 
-        # Initialize embeddings with Xavier uniform
+        # Initialize embeddings
         for embed in self.embed.values():
             nn.init.xavier_uniform_(embed)
 
-        # Create RGCN layers with residual connections
+        # Create RGCN layers
         self.layers = nn.ModuleList()
-
-        # Input layer
-        self.layers.append(
-            HeteroRGCNLayer(
-                embedding_size, hidden_size, etypes, num_heads, dropout, use_attention
-            )
-        )
+        self.layers.append(HeteroRGCNLayer(embedding_size, hidden_size, etypes))
 
         # Hidden layers
         for _ in range(n_layers - 1):
-            self.layers.append(
-                HeteroRGCNLayer(
-                    hidden_size, hidden_size, etypes, num_heads, dropout, use_attention
-                )
-            )
+            self.layers.append(HeteroRGCNLayer(hidden_size, hidden_size, etypes))
 
-        # Output layers
-        self.classifier = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.LayerNorm(hidden_size),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size, out_size),
-        )
-
-        self.loss_fn = FocalLoss(alpha=0.25, gamma=2)
+        # Output classification layer
+        self.layers.append(nn.Linear(hidden_size, out_size))
 
     def forward(self, g, features):
+        """
+        Args:
+            g (DGLGraph): The input graph
+            features (torch.Tensor): Input features for target nodes
+
+        Returns:
+            torch.Tensor: Logits for node classification
+        """
         # Get embeddings for all node types
         h_dict = {ntype: emb for ntype, emb in self.embed.items()}
         h_dict["target"] = features
 
         # Forward pass through RGCN layers
-        for i, layer in enumerate(self.layers):
-            h_dict = layer(g, h_dict)
-            if i != len(self.layers) - 1:
-                # Apply non-linearity between layers
+        for i, layer in enumerate(self.layers[:-1]):
+            if i != 0:
                 h_dict = {k: F.leaky_relu(h) for k, h in h_dict.items()}
+            h_dict = layer(g, h_dict)
 
-        # Final classification
-        return self.classifier(h_dict["target"])
-
-    def get_loss(self, logits, labels):
-        return self.loss_fn(logits, labels)
-
-
-class FocalLoss(nn.Module):
-    """Focal Loss for handling class imbalance."""
-
-    def __init__(self, alpha=0.25, gamma=2):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-
-    def forward(self, inputs, targets):
-        ce_loss = F.cross_entropy(inputs, targets, reduction="none")
-        pt = torch.exp(-ce_loss)
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
-        return focal_loss.mean()
+        # Final classification layer
+        return self.layers[-1](h_dict["target"])

@@ -3,210 +3,220 @@ import os
 import pickle
 import sys
 import time
-from typing import Dict, Optional, Tuple
 
 import dgl
 import numpy as np
-import pandas as pd
 import torch
-import torch.optim as optim
+import torch.optim
 from graph_utils import construct_graph, get_edgelists, get_labels
 from model import HeteroRGCN
-from torch.cuda.amp import GradScaler, autocast
-from torch.optim.lr_scheduler import OneCycleLR
+from sklearn.metrics import confusion_matrix
 from utils import get_logger, get_metrics, parse_args
 
-logger = get_logger(__name__)
+# Set up environment
+curPath = os.path.abspath(os.path.dirname(__file__))
+sys.path.append(curPath)
+os.environ["DGLBACKEND"] = "pytorch"
 
 
-class Trainer:
-    def __init__(
-        self,
-        model: HeteroRGCN,
-        optimizer: optim.Optimizer,
-        scheduler: optim.lr_scheduler._LRScheduler,
-        device: torch.device,
-        model_dir: str,
-        mixed_precision: bool = True,
-    ):
-        self.model = model
-        self.optimizer = optimizer
-        self.scheduler = scheduler
-        self.device = device
-        self.model_dir = model_dir
-        self.mixed_precision = mixed_precision
-        self.scaler = GradScaler() if mixed_precision else None
+def initial_record():
+    """Initialize results file."""
+    if os.path.exists("./output/results.txt"):
+        os.remove("./output/results.txt")
+    with open("./output/results.txt", "w") as f:
+        f.write("Epoch,Time(s),Loss,F1\n")
 
-        self.best_model = None
-        self.best_val_score = float("-inf")
-        self.best_epoch = 0
 
-    def train_epoch(
-        self,
-        train_g: dgl.DGLGraph,
-        features: torch.Tensor,
-        labels: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> Tuple[float, float]:
-        """Train for one epoch."""
-        self.model.train()
+def normalize(feature_matrix):
+    """Normalize features using mean and standard deviation."""
+    mean = torch.mean(feature_matrix, axis=0)
+    stdev = torch.sqrt(
+        torch.sum((feature_matrix - mean) ** 2, axis=0) / feature_matrix.shape[0]
+    )
+    return mean, stdev, (feature_matrix - mean) / stdev
 
-        with autocast(enabled=self.mixed_precision):
-            # Forward pass
-            logits = self.model(train_g, features)
-            loss = self.model.get_loss(logits[valid_mask], labels[valid_mask])
 
-        # Backward pass with gradient scaling
-        self.optimizer.zero_grad()
-        if self.mixed_precision:
-            self.scaler.scale(loss).backward()
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+def train_fg(
+    model,
+    optim,
+    loss_fn,
+    features,
+    labels,
+    train_g,
+    test_g,
+    test_mask,
+    device,
+    n_epochs,
+    thresh,
+    compute_metrics=True,
+):
+    """Train model using full graph batching."""
+    duration = []
+    best_loss = float("inf")
+    best_model = None
+
+    for epoch in range(n_epochs):
+        tic = time.time()
+
+        # Forward pass
+        pred = model(train_g, features.to(device))
+        loss_val = loss_fn(pred, labels)
+
+        # Backward pass
+        optim.zero_grad()
+        loss_val.backward()
+        optim.step()
+
+        duration.append(time.time() - tic)
+        metric = evaluate(model, train_g, features, labels, device)
+
+        print(
+            f"Epoch {epoch:05d}, Time(s) {np.mean(duration):.4f}, "
+            f"Loss {loss_val:.4f}, F1 {metric:.4f}"
+        )
+
+        # Save results
+        with open("./output/results.txt", "a+") as f:
+            f.write(
+                f"{epoch:05d},{np.mean(duration):.4f},{loss_val:.4f},{metric:.4f}\n"
+            )
+
+        # Save best model
+        if loss_val < best_loss:
+            best_loss = loss_val
+            best_model = copy.deepcopy(model)
+
+    # Get predictions
+    class_preds, pred_proba = get_model_class_predictions(
+        best_model, test_g, features, labels, device, threshold=thresh
+    )
+
+    # Compute metrics
+    if compute_metrics:
+        metrics = get_metrics(
+            class_preds, pred_proba, labels.numpy(), test_mask.numpy(), "./output/"
+        )
+        print_metrics(*metrics)
+
+    return best_model, class_preds, pred_proba
+
+
+def evaluate(model, g, features, labels, device):
+    """Compute F1 score for binary classification."""
+    preds = model(g, features.to(device))
+    preds = torch.argmax(preds, axis=1).cpu().numpy()
+    return compute_f1_score(labels.cpu().numpy(), preds)
+
+
+def compute_f1_score(y_true, y_pred):
+    """Compute F1 score from confusion matrix."""
+    cf_m = confusion_matrix(y_true, y_pred)
+    precision = cf_m[1, 1] / (cf_m[1, 1] + cf_m[0, 1] + 1e-5)
+    recall = cf_m[1, 1] / (cf_m[1, 1] + cf_m[1, 0])
+    f1 = 2 * (precision * recall) / (precision + recall + 1e-5)
+    return f1
+
+
+def get_model_class_predictions(model, g, features, labels, device, threshold=None):
+    """Get model predictions and probabilities."""
+    with torch.no_grad():
+        logits = model(g, features.to(device))
+        probs = torch.softmax(logits, dim=-1)
+
+        if threshold is None:
+            preds = logits.argmax(axis=1).cpu().numpy()
         else:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-            self.optimizer.step()
+            preds = (probs[:, 1] > threshold).cpu().numpy()
 
-        self.scheduler.step()
+        return preds, probs[:, 1].cpu().numpy()
 
-        # Calculate metrics
-        with torch.no_grad():
-            f1_score = self.evaluate(train_g, features, labels, valid_mask)
 
-        return loss.item(), f1_score
+def save_model(g, model, model_dir, id_to_node, mean, stdev):
+    """Save model and metadata."""
+    # Save model parameters
+    torch.save(model.state_dict(), os.path.join(model_dir, "model.pth"))
 
-    @torch.no_grad()
-    def evaluate(
-        self,
-        g: dgl.DGLGraph,
-        features: torch.Tensor,
-        labels: torch.Tensor,
-        mask: torch.Tensor,
-    ) -> float:
-        """Evaluate model."""
-        self.model.eval()
-        logits = self.model(g, features)
-        preds = torch.argmax(logits[mask], axis=1)
-        return self.compute_f1_score(labels[mask].cpu(), preds.cpu())
+    # Save metadata
+    metadata = {
+        "etypes": g.canonical_etypes,
+        "ntype_cnt": {ntype: g.number_of_nodes(ntype) for ntype in g.ntypes},
+        "feat_mean": mean,
+        "feat_std": stdev,
+    }
+    with open(os.path.join(model_dir, "metadata.pkl"), "wb") as f:
+        pickle.dump(metadata, f)
 
-    def train(
-        self,
-        train_g: dgl.DGLGraph,
-        features: torch.Tensor,
-        labels: torch.Tensor,
-        train_mask: torch.Tensor,
-        val_mask: torch.Tensor,
-        test_mask: torch.Tensor,
-        n_epochs: int,
-        patience: int = 20,
-    ):
-        """Full training loop with early stopping."""
-        patience_counter = 0
-        train_times = []
+    # Save node embeddings
+    for ntype, mapping in id_to_node.items():
+        if ntype == "target":
+            continue
 
-        for epoch in range(n_epochs):
-            tic = time.time()
+        # Get node mappings
+        old_ids = list(mapping.keys())
+        node_ids = list(mapping.values())
 
-            # Training step
-            loss, train_f1 = self.train_epoch(train_g, features, labels, train_mask)
+        # Get embeddings
+        embeddings = model.embed[ntype].detach().numpy()
 
-            # Validation step
-            val_f1 = self.evaluate(train_g, features, labels, val_mask)
+        # Create DataFrames
+        node_df = pd.DataFrame(
+            {
+                "~label": [ntype] * len(old_ids),
+                "~id_tmp": old_ids,
+                "~id": [f"{ntype}-{id_}" for id_ in old_ids],
+                "node_id": node_ids,
+            }
+        )
 
-            # Update best model
-            if val_f1 > self.best_val_score:
-                self.best_val_score = val_f1
-                self.best_model = copy.deepcopy(self.model)
-                self.best_epoch = epoch
-                patience_counter = 0
-            else:
-                patience_counter += 1
+        # Create feature columns
+        feat_df = pd.DataFrame(
+            {f"val{i+1}:Double": embeddings[:, i] for i in range(embeddings.shape[1])}
+        )
 
-            # Timing and logging
-            epoch_time = time.time() - tic
-            train_times.append(epoch_time)
+        # Merge and save
+        result_df = node_df.merge(feat_df, left_on="node_id", right_index=True)
+        result_df = result_df.drop(["~id_tmp", "node_id"], axis=1)
+        result_df.to_csv(
+            os.path.join(model_dir, f"{ntype}.csv"),
+            index=False,
+            header=True,
+            encoding="utf-8",
+        )
 
-            if epoch % 10 == 0:
-                logger.info(
-                    f"Epoch {epoch:05d} | Time(s) {np.mean(train_times):.4f} | "
-                    f"Loss {loss:.4f} | Train F1 {train_f1:.4f} | Val F1 {val_f1:.4f}"
-                )
 
-            # Early stopping
-            if patience_counter >= patience:
-                logger.info(f"Early stopping triggered at epoch {epoch}")
-                break
-
-        # Final evaluation
-        self.model = self.best_model
-        test_f1 = self.evaluate(train_g, features, labels, test_mask)
-        logger.info(f"Test F1: {test_f1:.4f}")
-
-        return test_f1
-
-    @staticmethod
-    def compute_f1_score(labels: torch.Tensor, preds: torch.Tensor) -> float:
-        """Compute F1 score."""
-        tp = ((preds == 1) & (labels == 1)).sum().item()
-        fp = ((preds == 1) & (labels == 0)).sum().item()
-        fn = ((preds == 0) & (labels == 1)).sum().item()
-
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-
-        return 2 * (precision * recall) / (precision + recall + 1e-8)
-
-    def save_checkpoint(self, epoch: int, metrics: Dict):
-        """Save model checkpoint."""
-        checkpoint = {
-            "epoch": epoch,
-            "model_state_dict": self.model.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "scheduler_state_dict": self.scheduler.state_dict(),
-            "metrics": metrics,
-        }
-
-        path = os.path.join(self.model_dir, f"checkpoint_epoch_{epoch}.pt")
-        torch.save(checkpoint, path)
-        logger.info(f"Saved checkpoint to {path}")
-
-    def load_checkpoint(self, path: str):
-        """Load model checkpoint."""
-        checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint["model_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        logger.info(f"Loaded checkpoint from {path}")
-        return checkpoint["epoch"], checkpoint["metrics"]
+def print_metrics(acc, f1, precision, recall, roc_auc, pr_auc, ap, cm):
+    """Print model evaluation metrics."""
+    print("\nMetrics:")
+    print(f"Confusion Matrix:\n{cm}")
+    print(f"F1: {f1:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall: {recall:.4f}")
+    print(f"Accuracy: {acc:.4f}")
+    print(f"ROC AUC: {roc_auc:.4f}")
+    print(f"PR AUC: {pr_auc:.4f}")
+    print(f"Average Precision: {ap:.4f}")
 
 
 def main():
     args = parse_args()
-    logger.info(f"Running with args: {args}")
+    print(f"Running with args: {args}")
 
-    # Set up device and environment
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() and args.num_gpus > 0 else "cpu"
-    )
-    torch.backends.cudnn.benchmark = True
+    # Set up device
+    device = torch.device("cuda:0" if args.num_gpus else "cpu")
 
-    # Construct graph and prepare data
+    # Get edge lists and construct graph
     args.edges = get_edgelists("relation*", args.training_dir)
     g, features, target_id_to_node, id_to_node = construct_graph(
         args.training_dir, args.edges, args.nodes, args.target_ntype
     )
 
-    # Feature preprocessing
-    features = torch.from_numpy(features).float()
-    mean = features.mean(dim=0, keepdim=True)
-    std = features.std(dim=0, keepdim=True) + 1e-6
-    features = (features - mean) / std
+    # Normalize features
+    mean, stdev, features = normalize(torch.from_numpy(features))
+    g.nodes["target"].data["features"] = features
 
-    # Get labels and create masks
+    # Get labels and masks
     n_nodes = g.number_of_nodes("target")
-    labels, train_mask, test_mask = get_labels(
+    labels, _, test_mask = get_labels(
         target_id_to_node,
         n_nodes,
         args.target_ntype,
@@ -214,148 +224,70 @@ def main():
         os.path.join(args.training_dir, args.new_accounts),
     )
 
-    # Split train into train/val
-    train_indices = torch.where(train_mask)[0]
-    val_size = int(0.2 * len(train_indices))
-    val_indices = train_indices[:val_size]
-    train_indices = train_indices[val_size:]
-
-    val_mask = torch.zeros_like(train_mask)
-    val_mask[val_indices] = 1
-    train_mask[val_indices] = 0
-
-    # Convert to tensors and move to device
-    features = features.to(device)
+    # Convert to tensors
     labels = torch.from_numpy(labels).long().to(device)
-    train_mask = torch.from_numpy(train_mask).to(device)
-    val_mask = val_mask.to(device)
     test_mask = torch.from_numpy(test_mask).to(device)
-    g = g.to(device)
+    features = features.to(device)
+
+    # Print data statistics
+    print_data_stats(g, features, test_mask)
 
     # Initialize model
     in_feats = features.shape[1]
-    ntype_dict = {ntype: g.number_of_nodes(ntype) for ntype in g.ntypes}
+    n_classes = 2
+    ntype_dict = {n_type: g.number_of_nodes(n_type) for n_type in g.ntypes}
 
     model = HeteroRGCN(
-        ntype_dict=ntype_dict,
-        etypes=g.etypes,
-        in_size=in_feats,
-        hidden_size=args.n_hidden,
-        out_size=2,  # binary classification
-        n_layers=args.n_layers,
-        embedding_size=args.embedding_size,
-        num_heads=4,
-        dropout=args.dropout,
-        use_attention=True,
+        ntype_dict,
+        g.etypes,
+        in_feats,
+        args.n_hidden,
+        n_classes,
+        args.n_layers,
+        in_feats,
     ).to(device)
 
-    # Set up optimizer and scheduler
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay, amsgrad=True
+    # Set up training
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
+    loss_fn = torch.nn.CrossEntropyLoss()
 
-    # OneCycle scheduler for better training dynamics
-    steps_per_epoch = 1  # since we're doing full-batch training
-    scheduler = OneCycleLR(
+    # Train model
+    print("Starting training...")
+    initial_record()
+    model, class_preds, pred_proba = train_fg(
+        model,
         optimizer,
-        max_lr=args.lr,
-        epochs=args.n_epochs,
-        steps_per_epoch=steps_per_epoch,
-        pct_start=0.3,
-        div_factor=25.0,
-        final_div_factor=10000.0,
+        loss_fn,
+        features,
+        labels,
+        g,
+        g,
+        test_mask,
+        device,
+        args.n_epochs,
+        args.threshold,
+        args.compute_metrics,
     )
 
-    # Initialize trainer
-    trainer = Trainer(
-        model=model,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        device=device,
-        model_dir=args.model_dir,
-        mixed_precision=True,
-    )
-
-    # Training loop
-    logger.info("Starting training...")
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    test_f1 = trainer.train(
-        train_g=g,
-        features=features,
-        labels=labels,
-        train_mask=train_mask,
-        val_mask=val_mask,
-        test_mask=test_mask,
-        n_epochs=args.n_epochs,
-        patience=20,
-    )
-
-    # Final evaluation and predictions
-    trainer.model.eval()
-    with torch.no_grad():
-        logits = trainer.model(g, features)
-        probs = torch.softmax(logits, dim=1)
-        preds = torch.argmax(logits, dim=1)
-
-    # Save predictions
-    test_indices = torch.where(test_mask)[0].cpu()
-    predictions_df = pd.DataFrame(
-        {
-            "node_idx": test_indices.numpy(),
-            "prediction": preds[test_mask].cpu().numpy(),
-            "probability": probs[test_mask, 1].cpu().numpy(),
-        }
-    )
-    predictions_df.to_csv(os.path.join(args.output_dir, "predictions.csv"), index=False)
-
-    # Save model and metadata
-    save_model_and_metadata(
-        g=g,
-        model=trainer.model,
-        model_dir=args.model_dir,
-        id_to_node=id_to_node,
-        feature_stats={"mean": mean, "std": std},
-        metrics={"test_f1": test_f1},
-    )
-
-    logger.info("Training completed successfully!")
+    # Save model
+    if not os.path.exists(args.model_dir):
+        os.makedirs(args.model_dir)
+    save_model(g, model, args.model_dir, id_to_node, mean, stdev)
+    print("Training completed. Model and metadata saved.")
 
 
-def save_model_and_metadata(g, model, model_dir, id_to_node, feature_stats, metrics):
-    """Save model, embeddings, and associated metadata."""
-    os.makedirs(model_dir, exist_ok=True)
+def print_data_stats(g, features, test_mask):
+    """Print dataset statistics."""
+    n_nodes = sum(g.number_of_nodes(ntype) for ntype in g.ntypes)
+    n_edges = sum(g.number_of_edges(etype) for etype in g.etypes)
 
-    # Save model state
-    torch.save(model.state_dict(), os.path.join(model_dir, "model.pt"))
-
-    # Save metadata
-    metadata = {
-        "etypes": g.canonical_etypes,
-        "ntype_cnt": {ntype: g.number_of_nodes(ntype) for ntype in g.ntypes},
-        "feature_stats": feature_stats,
-        "metrics": metrics,
-    }
-
-    with open(os.path.join(model_dir, "metadata.pkl"), "wb") as f:
-        pickle.dump(metadata, f)
-
-    # Save node embeddings for each type
-    for ntype, mapping in id_to_node.items():
-        if ntype == "target":
-            continue
-
-        # Get the learned embeddings
-        embeddings = model.embed[ntype].detach().cpu().numpy()
-
-        # Create DataFrame with node information
-        embedding_df = pd.DataFrame(
-            embeddings,
-            index=[f"{ntype}-{idx}" for idx in mapping.keys()],
-            columns=[f"dim_{i}" for i in range(embeddings.shape[1])],
-        )
-
-        embedding_df.to_csv(os.path.join(model_dir, f"{ntype}_embeddings.csv"))
+    print("\nDataset Statistics:")
+    print(f"Number of Nodes: {n_nodes}")
+    print(f"Number of Edges: {n_edges}")
+    print(f"Feature Shape: {features.shape}")
+    print(f"Number of Test Samples: {test_mask.sum()}\n")
 
 
 if __name__ == "__main__":
