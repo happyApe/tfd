@@ -1,0 +1,12 @@
+numpy
+matplotlib
+pandas
+scikit-learn
+dgl
+torch
+torch_geometric
+networkx
+tqdm
+typing-extensions
+tensorboard
+

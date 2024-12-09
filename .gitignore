@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+
+# Virtual Environment
+venv/
+ENV/
+
+# Dataset directories
+*.zip
+data/
+data/ieee_cis/
+data/ieee_cis_clean/
+data/elliptic_bitcoin_dataset/
+
+# Model outputs and logs
+models/
+outputs/
+logs/
+weights/
+runs/
+*.pt
+*.pth
+
+# Misc
+.DS_Store
+.env
+.coverage
+htmlcov/
+.pytest_cache/
+*.log
+*.csv
+*.json
+*.pkl
+
+# Keep specific files
+!requirements.txt
+!README.md
