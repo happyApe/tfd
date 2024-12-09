@@ -19,17 +19,29 @@ def get_features(id_to_node, node_features):
 
     Returns:
         tuple: (feature matrix, list of new nodes)
-            - np.ndarray: Node feature matrix in order
-            - list: New nodes not yet in the graph
     """
     indices, features, new_nodes = [], [], []
     max_node = max(id_to_node.values())
+
+    def convert_feature(x):
+        """Convert feature value to float, handling special cases."""
+        if x.lower() == "false":
+            return 0.0
+        elif x.lower() == "true":
+            return 1.0
+        try:
+            return float(x)
+        except ValueError:
+            # For categorical values, you might want to implement encoding here
+            return 0.0  # Default value for now
 
     with open(node_features, "r") as fh:
         for line in fh:
             node_feats = line.strip().split(",")
             node_id = node_feats[0]
-            feats = np.array(list(map(float, node_feats[1:])))
+
+            # Convert features with proper type handling
+            feats = np.array([convert_feature(x) for x in node_feats[1:]])
             features.append(feats)
 
             if node_id not in id_to_node:
@@ -41,6 +53,11 @@ def get_features(id_to_node, node_features):
 
     features = np.array(features).astype("float32")
     features = features[np.argsort(indices), :]
+
+    # Add some logging for debugging
+    print(f"Loaded features shape: {features.shape}")
+    print(f"Number of unique nodes: {len(set(indices))}")
+
     return features, new_nodes
 
 
