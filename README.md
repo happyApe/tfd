@@ -29,6 +29,10 @@ transaction_fraud_detection_with_gnns_tabnet/
 ```bash
 pip install -r requirements.txt
 ```
+As I was using CUDA 12.4, For DGL compatibility, I had to install the following:
+```bash
+pip install  dgl -f https://data.dgl.ai/wheels/torch-2.4/cu124/repo.html
+```
 
 2. Download Elliptic Dataset:
 ```bash
