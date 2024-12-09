@@ -41,8 +41,8 @@ unzip elliptic-data-set.zip -d src/elliptic_gnn/data/
 ```bash
 kaggle competitions download -c ieee-fraud-detection
 unzip ieee-fraud-detection.zip
-mkdir -p src/cis_gnn/data
-mv *.csv src/cis_gnn/data/
+mkdir -p src/cis_gnn/data/ieee_cis
+mv *.csv src/cis_gnn/data/ieee_cis/
 ```
 
 ## Usage
@@ -56,6 +56,7 @@ python main.py --model-type gat --epochs 100
 ### IEEE-CIS Dataset
 ```bash
 cd src/cis_gnn
+python process_data.py
 python train.py
 ```
 
