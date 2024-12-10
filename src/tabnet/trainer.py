@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from models import FocalLoss
 from sklearn.metrics import (
     classification_report,
     confusion_matrix,

@@ -8,19 +8,24 @@ This part of project implements credit card fraud detection using two different 
 
 The dataset used in this project is available in the Capital One Recruiting GitHub repository:
 
-1. Clone the repository:
+Get the dataset by running these commands:
 ```bash
+# Clone the repository
 git clone https://github.com/CapitalOneRecruiting/DS.git
-```
 
-2. Navigate to the cloned repository and find `transactions.zip`
+# Navigate into the repository
+cd DS
 
-3. Unzip the file to get `transactions.txt`:
-```bash
+# Unzip the transactions file
 unzip transactions.zip
-```
 
-4. Move or copy `transactions.txt` to your project directory
+# Move the transactions.txt file to your project directory
+# Assuming your project directory is one level up
+mv transactions.txt ../
+
+# Return to your project directory
+cd ..
+```
 
 The dataset contains credit card transactions with various features including transaction amount, merchant information, and fraud labels.
 
