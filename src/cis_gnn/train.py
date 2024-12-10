@@ -6,6 +6,7 @@ import time
 
 import dgl
 import numpy as np
+import pandas as pd
 import torch
 import torch.optim
 from graph_utils import construct_graph, get_edgelists, get_labels
@@ -219,6 +220,21 @@ def print_metrics(acc, f1, precision, recall, roc_auc, pr_auc, ap, cm):
 def main():
     args = parse_args()
     print(f"Running with args: {args}")
+
+    # Check if model already exists
+    model_exists = os.path.exists(os.path.join(args.model_dir, "model.pth"))
+    if model_exists:
+        while True:
+            response = input(
+                "Model already exists. Do you want to retrain? (y/n): "
+            ).lower()
+            if response in ["y", "n"]:
+                break
+            print("Please enter 'y' or 'n'")
+
+        if response == "n":
+            print("Exiting without training...")
+            return
 
     # Set up device and GPU settings
     if torch.cuda.is_available() and args.num_gpus > 0:
