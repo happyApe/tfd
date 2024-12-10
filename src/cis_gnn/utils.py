@@ -5,9 +5,11 @@ import os
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 from sklearn.metrics import (
     auc,
     average_precision_score,
+    confusion_matrix,
     precision_recall_curve,
     roc_curve,
 )
@@ -33,20 +35,54 @@ def parse_args():
         help="Directory to save model",
     )
     parser.add_argument(
-        "--output-dir", type=str, default="./output", help="Directory to save output"
+        "--output-dir",
+        type=str,
+        default="./output",
+        help="Directory to save output",
     )
     parser.add_argument(
-        "--nodes", type=str, default="features.csv", help="Node features file"
+        "--nodes",
+        type=str,
+        default="features.csv",
+        help="Node features file",
     )
     parser.add_argument(
-        "--target-ntype", type=str, default="TransactionID", help="Target node type"
+        "--target-ntype",
+        type=str,
+        default="TransactionID",
+        help="Target node type",
     )
     parser.add_argument(
-        "--edges", type=str, default="relation*", help="Edge list files pattern"
+        "--edges",
+        type=str,
+        default="relation*",
+        help="Edge list files pattern",
     )
-    parser.add_argument("--labels", type=str, default="tags.csv", help="Labels file")
     parser.add_argument(
-        "--new-accounts", type=str, default="test.csv", help="Test nodes file"
+        "--labels",
+        type=str,
+        default="tags.csv",
+        help="Labels file",
+    )
+    parser.add_argument(
+        "--new-accounts",
+        type=str,
+        default="test.csv",
+        help="Test nodes file",
+    )
+
+    # GPU parameters
+    parser.add_argument(
+        "--num-gpus",
+        type=int,
+        default=1,
+        help="Number of GPUs to use (0 for CPU)",
+    )
+    parser.add_argument(
+        "--gpu-id",
+        type=int,
+        default=None,
+        help="Specific GPU ID to use",
     )
 
     # Model parameters
@@ -57,21 +93,40 @@ def parse_args():
         help="Compute evaluation metrics after training",
     )
     parser.add_argument(
-        "--threshold", type=float, default=0, help="Threshold for making predictions"
-    )
-    parser.add_argument("--num-gpus", type=int, default=0, help="Number of GPUs to use")
-    parser.add_argument(
-        "--optimizer", type=str, default="adam", help="Optimizer to use"
-    )
-    parser.add_argument("--lr", type=float, default=1e-2, help="Learning rate")
-    parser.add_argument(
-        "--n-epochs", type=int, default=700, help="Number of epochs to train"
+        "--threshold",
+        type=float,
+        default=0,
+        help="Threshold for making predictions",
     )
     parser.add_argument(
-        "--n-hidden", type=int, default=16, help="Number of hidden units"
+        "--optimizer",
+        type=str,
+        default="adam",
+        help="Optimizer to use",
     )
     parser.add_argument(
-        "--n-layers", type=int, default=3, help="Number of hidden layers"
+        "--lr",
+        type=float,
+        default=1e-2,
+        help="Learning rate",
+    )
+    parser.add_argument(
+        "--n-epochs",
+        type=int,
+        default=700,
+        help="Number of epochs to train",
+    )
+    parser.add_argument(
+        "--n-hidden",
+        type=int,
+        default=16,
+        help="Number of hidden units",
+    )
+    parser.add_argument(
+        "--n-layers",
+        type=int,
+        default=3,
+        help="Number of hidden layers",
     )
     parser.add_argument(
         "--weight-decay",
@@ -80,10 +135,16 @@ def parse_args():
         help="Weight decay for L2 regularization",
     )
     parser.add_argument(
-        "--dropout", type=float, default=0.2, help="Dropout probability"
+        "--dropout",
+        type=float,
+        default=0.2,
+        help="Dropout probability",
     )
     parser.add_argument(
-        "--embedding-size", type=int, default=360, help="Size of node embeddings"
+        "--embedding-size",
+        type=int,
+        default=360,
+        help="Size of node embeddings",
     )
 
     args = parser.parse_known_args()[0]
@@ -117,13 +178,24 @@ def get_metrics(pred, pred_proba, labels, mask, out_dir):
     Returns:
         tuple: (accuracy, f1, precision, recall, roc_auc, pr_auc, ap, confusion_matrix)
     """
+    # Ensure everything is on CPU and in numpy format
+    if isinstance(pred, torch.Tensor):
+        pred = pred.cpu().numpy()
+    if isinstance(pred_proba, torch.Tensor):
+        pred_proba = pred_proba.cpu().numpy()
+    if isinstance(labels, torch.Tensor):
+        labels = labels.cpu().numpy()
+    if isinstance(mask, torch.Tensor):
+        mask = mask.cpu().numpy()
+
     # Apply mask to get test samples
-    labels = labels[mask.astype(bool)]
-    pred = pred[mask.astype(bool)]
-    pred_proba = pred_proba[mask.astype(bool)]
+    mask = mask.astype(bool)
+    labels = labels[mask]
+    pred = pred[mask]
+    pred_proba = pred_proba[mask]
 
     # Calculate basic metrics
-    accuracy = (pred == labels).sum() / len(labels)
+    accuracy = (pred == labels).mean()
 
     # Calculate confusion matrix elements
     true_pos = ((pred == 1) & (labels == 1)).sum()
@@ -143,7 +215,7 @@ def get_metrics(pred, pred_proba, labels, mask, out_dir):
     )
 
     # Create confusion matrix
-    confusion_matrix = np.array([[true_pos, false_pos], [false_neg, true_neg]])
+    confusion_matrix = np.array([[true_neg, false_pos], [false_neg, true_pos]])
 
     # Calculate ROC and PR curves
     fpr, tpr, _ = roc_curve(labels, pred_proba)
@@ -178,6 +250,9 @@ def save_roc_curve(fpr, tpr, roc_auc, location):
     plt.ylabel("True Positive Rate")
     plt.title("Receiver Operating Characteristic (ROC) Curve")
     plt.legend(loc="lower right")
+
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(location), exist_ok=True)
     plt.savefig(location)
     plt.close()
 
@@ -198,6 +273,9 @@ def save_pr_curve(precision, recall, pr_auc, ap, location):
     plt.ylabel("Precision")
     plt.title(f"Precision-Recall Curve (AP = {ap:.2f})")
     plt.legend(loc="lower right")
+
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(location), exist_ok=True)
     plt.savefig(location)
     plt.close()
 

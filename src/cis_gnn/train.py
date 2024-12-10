@@ -29,11 +29,11 @@ def initial_record():
 
 def normalize(feature_matrix):
     """Normalize features using mean and standard deviation."""
-    mean = torch.mean(feature_matrix, axis=0)
+    mean = torch.mean(feature_matrix, dim=0)
     stdev = torch.sqrt(
-        torch.sum((feature_matrix - mean) ** 2, axis=0) / feature_matrix.shape[0]
+        torch.sum((feature_matrix - mean) ** 2, dim=0) / feature_matrix.shape[0]
     )
-    return mean, stdev, (feature_matrix - mean) / stdev
+    return mean, stdev, (feature_matrix - mean) / (stdev + 1e-8)
 
 
 def train_fg(
@@ -50,16 +50,29 @@ def train_fg(
     thresh,
     compute_metrics=True,
 ):
-    """Train model using full graph batching."""
+    """Train model using full graph batching with GPU support."""
     duration = []
     best_loss = float("inf")
     best_model = None
 
+    # Move everything to GPU if not already there
+    train_g = train_g.to(device)
+    test_g = test_g.to(device)
+    features = features.to(device)
+    labels = labels.to(device)
+    test_mask = test_mask.to(device)
+    model = model.to(device)
+
+    # Enable cuDNN benchmarking for better GPU performance
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+
     for epoch in range(n_epochs):
         tic = time.time()
 
+        model.train()
         # Forward pass
-        pred = model(train_g, features.to(device))
+        pred = model(train_g, features)
         loss_val = loss_fn(pred, labels)
 
         # Backward pass
@@ -68,17 +81,21 @@ def train_fg(
         optim.step()
 
         duration.append(time.time() - tic)
-        metric = evaluate(model, train_g, features, labels, device)
+
+        # Evaluation
+        model.eval()
+        with torch.no_grad():
+            metric = evaluate(model, train_g, features, labels, device)
 
         print(
             f"Epoch {epoch:05d}, Time(s) {np.mean(duration):.4f}, "
-            f"Loss {loss_val:.4f}, F1 {metric:.4f}"
+            f"Loss {loss_val.item():.4f}, F1 {metric:.4f}"
         )
 
         # Save results
         with open("./output/results.txt", "a+") as f:
             f.write(
-                f"{epoch:05d},{np.mean(duration):.4f},{loss_val:.4f},{metric:.4f}\n"
+                f"{epoch:05d},{np.mean(duration):.4f},{loss_val.item():.4f},{metric:.4f}\n"
             )
 
         # Save best model
@@ -87,14 +104,24 @@ def train_fg(
             best_model = copy.deepcopy(model)
 
     # Get predictions
-    class_preds, pred_proba = get_model_class_predictions(
-        best_model, test_g, features, labels, device, threshold=thresh
-    )
+    best_model.eval()
+    with torch.no_grad():
+        class_preds, pred_proba = get_model_class_predictions(
+            best_model, test_g, features, labels, device, threshold=thresh
+        )
+
+    # Move predictions to CPU for metric computation
+    class_preds = class_preds.cpu()
+    pred_proba = pred_proba.cpu()
 
     # Compute metrics
     if compute_metrics:
         metrics = get_metrics(
-            class_preds, pred_proba, labels.numpy(), test_mask.numpy(), "./output/"
+            class_preds.numpy(),
+            pred_proba.numpy(),
+            labels.cpu().numpy(),
+            test_mask.cpu().numpy(),
+            "./output/",
         )
         print_metrics(*metrics)
 
@@ -103,9 +130,10 @@ def train_fg(
 
 def evaluate(model, g, features, labels, device):
     """Compute F1 score for binary classification."""
-    preds = model(g, features.to(device))
-    preds = torch.argmax(preds, axis=1).cpu().numpy()
-    return compute_f1_score(labels.cpu().numpy(), preds)
+    with torch.no_grad():
+        preds = model(g, features)
+        preds = torch.argmax(preds, dim=1)
+        return compute_f1_score(labels.cpu().numpy(), preds.cpu().numpy())
 
 
 def compute_f1_score(y_true, y_pred):
@@ -120,19 +148,22 @@ def compute_f1_score(y_true, y_pred):
 def get_model_class_predictions(model, g, features, labels, device, threshold=None):
     """Get model predictions and probabilities."""
     with torch.no_grad():
-        logits = model(g, features.to(device))
+        logits = model(g, features)
         probs = torch.softmax(logits, dim=-1)
 
         if threshold is None:
-            preds = logits.argmax(axis=1).cpu().numpy()
+            preds = logits.argmax(dim=1)
         else:
-            preds = (probs[:, 1] > threshold).cpu().numpy()
+            preds = probs[:, 1] > threshold
 
-        return preds, probs[:, 1].cpu().numpy()
+        return preds, probs[:, 1]
 
 
 def save_model(g, model, model_dir, id_to_node, mean, stdev):
     """Save model and metadata."""
+    # Move model to CPU before saving
+    model = model.cpu()
+
     # Save model parameters
     torch.save(model.state_dict(), os.path.join(model_dir, "model.pth"))
 
@@ -140,8 +171,8 @@ def save_model(g, model, model_dir, id_to_node, mean, stdev):
     metadata = {
         "etypes": g.canonical_etypes,
         "ntype_cnt": {ntype: g.number_of_nodes(ntype) for ntype in g.ntypes},
-        "feat_mean": mean,
-        "feat_std": stdev,
+        "feat_mean": mean.cpu(),
+        "feat_std": stdev.cpu(),
     }
     with open(os.path.join(model_dir, "metadata.pkl"), "wb") as f:
         pickle.dump(metadata, f)
@@ -156,32 +187,20 @@ def save_model(g, model, model_dir, id_to_node, mean, stdev):
         node_ids = list(mapping.values())
 
         # Get embeddings
-        embeddings = model.embed[ntype].detach().numpy()
+        embeddings = model.embed[ntype].detach().cpu().numpy()
 
-        # Create DataFrames
-        node_df = pd.DataFrame(
+        # Save mappings and embeddings
+        pd.DataFrame(
             {
                 "~label": [ntype] * len(old_ids),
-                "~id_tmp": old_ids,
                 "~id": [f"{ntype}-{id_}" for id_ in old_ids],
                 "node_id": node_ids,
+                **{
+                    f"val{i+1}:Double": embeddings[:, i]
+                    for i in range(embeddings.shape[1])
+                },
             }
-        )
-
-        # Create feature columns
-        feat_df = pd.DataFrame(
-            {f"val{i+1}:Double": embeddings[:, i] for i in range(embeddings.shape[1])}
-        )
-
-        # Merge and save
-        result_df = node_df.merge(feat_df, left_on="node_id", right_index=True)
-        result_df = result_df.drop(["~id_tmp", "node_id"], axis=1)
-        result_df.to_csv(
-            os.path.join(model_dir, f"{ntype}.csv"),
-            index=False,
-            header=True,
-            encoding="utf-8",
-        )
+        ).to_csv(os.path.join(model_dir, f"{ntype}.csv"), index=False)
 
 
 def print_metrics(acc, f1, precision, recall, roc_auc, pr_auc, ap, cm):
@@ -201,17 +220,27 @@ def main():
     args = parse_args()
     print(f"Running with args: {args}")
 
-    # Set up device
-    device = torch.device("cuda:0" if args.num_gpus else "cpu")
+    # Set up device and GPU settings
+    if torch.cuda.is_available() and args.num_gpus > 0:
+        device = torch.device(
+            f"cuda:{args.gpu_id}" if args.gpu_id is not None else "cuda:0"
+        )
+        # Enable TF32 for better performance on Ampere GPUs
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        print(f"Using GPU: {torch.cuda.get_device_name(device)}")
+    else:
+        device = torch.device("cpu")
+        print("Warning: GPU not available or not requested, using CPU")
 
     # Get edge lists and construct graph
     args.edges = get_edgelists("relation*", args.training_dir)
     g, features, target_id_to_node, id_to_node = construct_graph(
-        args.training_dir, args.edges, args.nodes, args.target_ntype
+        args.training_dir, args.edges, args.nodes, args.target_ntype, device
     )
 
     # Normalize features
-    mean, stdev, features = normalize(torch.from_numpy(features))
+    mean, stdev, features = normalize(features)
     g.nodes["target"].data["features"] = features
 
     # Get labels and masks
@@ -222,35 +251,30 @@ def main():
         args.target_ntype,
         os.path.join(args.training_dir, args.labels),
         os.path.join(args.training_dir, args.new_accounts),
+        device=device,
     )
-
-    # Convert to tensors
-    labels = torch.from_numpy(labels).long().to(device)
-    test_mask = torch.from_numpy(test_mask).to(device)
-    features = features.to(device)
-
-    # Print data statistics
-    print_data_stats(g, features, test_mask)
 
     # Initialize model
-    in_feats = features.shape[1]
-    n_classes = 2
-    ntype_dict = {n_type: g.number_of_nodes(n_type) for n_type in g.ntypes}
-
     model = HeteroRGCN(
-        ntype_dict,
+        {n_type: g.number_of_nodes(n_type) for n_type in g.ntypes},
         g.etypes,
-        in_feats,
+        features.shape[1],
         args.n_hidden,
-        n_classes,
+        2,  # n_classes
         args.n_layers,
-        in_feats,
-    ).to(device)
-
-    # Set up training
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+        features.shape[1],  # embedding_size
+        device=device,
     )
+
+    # Set up optimizer with GPU-optimized settings
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        eps=1e-7,  # Improved numerical stability
+    )
+
+    # Loss function
     loss_fn = torch.nn.CrossEntropyLoss()
 
     # Train model
@@ -276,18 +300,6 @@ def main():
         os.makedirs(args.model_dir)
     save_model(g, model, args.model_dir, id_to_node, mean, stdev)
     print("Training completed. Model and metadata saved.")
-
-
-def print_data_stats(g, features, test_mask):
-    """Print dataset statistics."""
-    n_nodes = sum(g.number_of_nodes(ntype) for ntype in g.ntypes)
-    n_edges = sum(g.number_of_edges(etype) for etype in g.etypes)
-
-    print("\nDataset Statistics:")
-    print(f"Number of Nodes: {n_nodes}")
-    print(f"Number of Edges: {n_edges}")
-    print(f"Feature Shape: {features.shape}")
-    print(f"Number of Test Samples: {test_mask.sum()}\n")
 
 
 if __name__ == "__main__":

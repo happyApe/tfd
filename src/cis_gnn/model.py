@@ -9,18 +9,22 @@ class HeteroRGCNLayer(nn.Module):
     Heterogeneous GCN layer that handles multiple relation types.
     """
 
-    def __init__(self, in_size, out_size, etypes):
+    def __init__(self, in_size, out_size, etypes, device=None):
         """
         Args:
             in_size (int): Input feature size
             out_size (int): Output feature size
             etypes (list): List of edge types in the graph
+            device (torch.device): Device to place the layer on
         """
         super(HeteroRGCNLayer, self).__init__()
         # Create linear transformation for each relation
         self.weight = nn.ModuleDict(
             {name: nn.Linear(in_size, out_size) for name in etypes}
         )
+
+        if device is not None:
+            self.to(device)
 
     def forward(self, G, feat_dict):
         """
@@ -66,6 +70,7 @@ class HeteroRGCN(nn.Module):
         out_size,
         n_layers,
         embedding_size,
+        device=None,
     ):
         """
         Args:
@@ -76,6 +81,7 @@ class HeteroRGCN(nn.Module):
             out_size (int): Output size (num classes)
             n_layers (int): Number of RGCN layers
             embedding_size (int): Size of learned node embeddings
+            device (torch.device): Device to place the model on
         """
         super(HeteroRGCN, self).__init__()
 
@@ -94,14 +100,19 @@ class HeteroRGCN(nn.Module):
 
         # Create RGCN layers
         self.layers = nn.ModuleList()
-        self.layers.append(HeteroRGCNLayer(embedding_size, hidden_size, etypes))
+        self.layers.append(HeteroRGCNLayer(embedding_size, hidden_size, etypes, device))
 
         # Hidden layers
         for _ in range(n_layers - 1):
-            self.layers.append(HeteroRGCNLayer(hidden_size, hidden_size, etypes))
+            self.layers.append(
+                HeteroRGCNLayer(hidden_size, hidden_size, etypes, device)
+            )
 
         # Output classification layer
-        self.layers.append(nn.Linear(hidden_size, out_size))
+        self.classifier = nn.Linear(hidden_size, out_size)
+
+        if device is not None:
+            self.to(device)
 
     def forward(self, g, features):
         """
@@ -117,10 +128,10 @@ class HeteroRGCN(nn.Module):
         h_dict["target"] = features
 
         # Forward pass through RGCN layers
-        for i, layer in enumerate(self.layers[:-1]):
+        for i, layer in enumerate(self.layers):
             if i != 0:
                 h_dict = {k: F.leaky_relu(h) for k, h in h_dict.items()}
             h_dict = layer(g, h_dict)
 
         # Final classification layer
-        return self.layers[-1](h_dict["target"])
+        return self.classifier(h_dict["target"])

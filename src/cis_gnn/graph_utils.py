@@ -9,13 +9,14 @@ import torch
 from utils import get_logger
 
 
-def get_features(id_to_node, node_features):
+def get_features(id_to_node, node_features, device):
     """
     Get node features from file and map to graph nodes.
 
     Args:
         id_to_node (dict): Dictionary mapping node names(id) to dgl node idx
         node_features (str): Path to file containing node features
+        device (torch.device): Device to store tensors on
 
     Returns:
         tuple: (feature matrix, list of new nodes)
@@ -32,15 +33,13 @@ def get_features(id_to_node, node_features):
         try:
             return float(x)
         except ValueError:
-            # For categorical values, you might want to implement encoding here
-            return 0.0  # Default value for now
+            return 0.0
 
     with open(node_features, "r") as fh:
         for line in fh:
             node_feats = line.strip().split(",")
             node_id = node_feats[0]
 
-            # Convert features with proper type handling
             feats = np.array([convert_feature(x) for x in node_feats[1:]])
             features.append(feats)
 
@@ -54,7 +53,9 @@ def get_features(id_to_node, node_features):
     features = np.array(features).astype("float32")
     features = features[np.argsort(indices), :]
 
-    # Add some logging for debugging
+    # Convert to torch tensor and move to device
+    features = torch.from_numpy(features).to(device)
+
     print(f"Loaded features shape: {features.shape}")
     print(f"Number of unique nodes: {len(set(indices))}")
 
@@ -68,6 +69,7 @@ def get_labels(
     labels_path,
     masked_nodes_path,
     additional_mask_rate=0,
+    device=None,
 ):
     """
     Get node labels and masks for training/testing.
@@ -79,12 +81,10 @@ def get_labels(
         labels_path (str): Path to file containing labeled nodes
         masked_nodes_path (str): Path to file containing nodes to mask
         additional_mask_rate (float): Additional masking rate for training nodes
+        device (torch.device): Device to store tensors on
 
     Returns:
         tuple: (labels, train_mask, test_mask)
-            - np.ndarray: Node labels
-            - np.ndarray: Training mask
-            - np.ndarray: Testing mask
     """
     node_to_id = {v: k for k, v in id_to_node.items()}
     user_to_label = pd.read_csv(labels_path).set_index(target_node_type)
@@ -96,6 +96,16 @@ def get_labels(
     train_mask, test_mask = _get_mask(
         id_to_node, node_to_id, n_nodes, masked_nodes, additional_mask_rate
     )
+
+    # Convert to torch tensors and move to device if specified
+    labels = torch.from_numpy(labels)
+    train_mask = torch.from_numpy(train_mask)
+    test_mask = torch.from_numpy(test_mask)
+
+    if device is not None:
+        labels = labels.to(device)
+        train_mask = train_mask.to(device)
+        test_mask = test_mask.to(device)
 
     return labels, train_mask, test_mask
 
@@ -148,19 +158,7 @@ def _get_node_idx(id_to_node, node_type, node_id, ptr):
 def parse_edgelist(
     edges, id_to_node, header=False, source_type="user", sink_type="user"
 ):
-    """
-    Parse edge list file and create graph edges.
-
-    Args:
-        edges (str): Path to comma separated edge list file
-        id_to_node (dict): Node ID to index mapping
-        header (bool): Whether file has header
-        source_type (str): Source node type
-        sink_type (str): Sink node type
-
-    Returns:
-        tuple: (edge_list, rev_edge_list, id_to_node, source_type, sink_type)
-    """
+    """Parse edge list file and create graph edges."""
     edge_list = []
     rev_edge_list = []
     source_pointer = sink_pointer = 0
@@ -206,7 +204,7 @@ def get_edgelists(edgelist_expression, directory):
     return [filename for filename in files if compiled_expression.match(filename)]
 
 
-def construct_graph(training_dir, edges, nodes, target_node_type):
+def construct_graph(training_dir, edges, nodes, target_node_type, device=None):
     """
     Construct heterogeneous graph from edge lists and features.
 
@@ -215,6 +213,7 @@ def construct_graph(training_dir, edges, nodes, target_node_type):
         edges (list): List of edge list files
         nodes (str): Node features file
         target_node_type (str): Target node type
+        device (torch.device): Device to store graph and tensors on
 
     Returns:
         tuple: (graph, features, target_id_to_node, id_to_node)
@@ -243,7 +242,9 @@ def construct_graph(training_dir, edges, nodes, target_node_type):
 
     # Get features for target nodes
     features, new_nodes = get_features(
-        id_to_node[target_node_type], os.path.join(training_dir, nodes)
+        id_to_node[target_node_type],
+        os.path.join(training_dir, nodes),
+        device,
     )
     print("Read features for target nodes")
 
@@ -253,12 +254,15 @@ def construct_graph(training_dir, edges, nodes, target_node_type):
     ]
 
     g = dgl.heterograph(edgelists)
+    if device is not None:
+        g = g.to(device)
+
     print(
         f"Constructed heterograph with: Node types {g.ntypes}, Edge types {g.canonical_etypes}"
     )
     print(f"Number of target nodes: {g.number_of_nodes('target')}")
 
-    g.nodes["target"].data["features"] = torch.from_numpy(features)
+    g.nodes["target"].data["features"] = features
 
     target_id_to_node = id_to_node[target_node_type]
     id_to_node["target"] = target_id_to_node
