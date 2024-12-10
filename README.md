@@ -14,11 +14,16 @@ transaction_fraud_detection_with_gnns_tabnet/
 │   │   ├── train.py
 │   │   └── utils.py
 │   │
-│   └── elliptic_gnn/         # Elliptic Bitcoin implementation
-│       ├── datasets.py
-│       ├── models.py
-│       ├── trainer.py
-│       └── main.py
+│   |── elliptic_gnn/         # Elliptic Bitcoin implementation
+│   |   ├── datasets.py
+│   |   ├── models.py
+│   |   ├── trainer.py
+│   |   └── main.py
+│   └── tabnet/               # TabNet implementation
+|        ├── data_processor.py     
+|        ├── models.py            
+|        ├── trainer.py          
+|        ├── main.py            
 ├── README.md
 └── requirements.txt
 ```

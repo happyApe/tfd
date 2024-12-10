@@ -36,7 +36,6 @@ The dataset contains credit card transactions with various features including tr
 ├── models.py            # Model implementations
 ├── trainer.py           # Training and evaluation utilities
 ├── main.py             # Main execution script
-└── requirements.txt    # Project dependencies
 ```
 
 ## Setup
