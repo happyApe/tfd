@@ -9,4 +9,5 @@ networkx
 tqdm
 typing-extensions
 tensorboard
+imbalanced-learn
 
