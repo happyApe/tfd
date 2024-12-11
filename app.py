@@ -2,7 +2,6 @@
 import glob
 import json
 import os
-
 # Add parent directory to path to import from src
 import sys
 from datetime import datetime
@@ -206,4 +205,4 @@ if __name__ == "__main__":
     models, graphs = load_model_and_data()
     print("Loaded models:", list(models.keys()))
     print("Loaded graphs:", list(graphs.keys()))
-    app.run(debug=True)
+    app.run(debug=False)
