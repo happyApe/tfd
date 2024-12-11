@@ -1,12 +1,12 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Fraud Detection Network Visualization</title>
+    <title>Fraud Detection Network Analysis</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
     <style>
         body {
             margin: 0;
-            font-family: Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
             background-color: #f8f9fa;
         }
 
@@ -21,101 +21,52 @@
             z-index: 1000;
             max-height: 90vh;
             overflow-y: auto;
-            width: 280px;
+            width: 300px;
         }
 
         .controls h3 {
-            margin-top: 0;
-            margin-bottom: 15px;
-            color: #2c3e50;
-            border-bottom: 1px solid #eee;
+            margin: 0 0 15px 0;
             padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+            color: #2c3e50;
+            font-size: 18px;
+        }
+
+        .panel {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+        }
+
+        .panel-title {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: #2c3e50;
         }
 
         select {
             width: 100%;
             padding: 8px;
-            margin-bottom: 15px;
             border: 1px solid #ddd;
             border-radius: 4px;
-            background-color: white;
+            margin-bottom: 15px;
+            font-size: 14px;
         }
 
-        #graph {
-            width: 100vw;
-            height: 100vh;
-            background-color: #ffffff;
-        }
-
-        .node {
-            stroke: #fff;
-            stroke-width: 1.5px;
-            cursor: pointer;
-            transition: all 0.2s ease;
-        }
-
-        .node:hover {
-            stroke-width: 2.5px;
-        }
-
-        .link {
-            stroke: #999;
-            stroke-opacity: 0.6;
-            stroke-width: 0.5px;
-        }
-
-        .tooltip {
-            position: absolute;
-            padding: 10px;
-            background: rgba(0, 0, 0, 0.8);
-            color: white;
-            border-radius: 4px;
-            font-size: 12px;
-            pointer-events: none;
-            z-index: 1100;
-            max-width: 200px;
-        }
-
-        .stats {
-            background: #f8f9fa;
-            padding: 15px;
-            border-radius: 4px;
-            margin: 15px 0;
-            font-size: 13px;
-        }
-
-        .stats p {
-            margin: 5px 0;
-            color: #666;
-        }
-
-        .legend {
-            margin-top: 15px;
-            padding: 15px;
-            background: #f8f9fa;
-            border-radius: 4px;
-        }
-
-        .legend-item {
+        .toggle-switch {
             display: flex;
             align-items: center;
-            margin-bottom: 8px;
-            font-size: 12px;
+            margin: 10px 0;
         }
 
-        .legend-color {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
+        .toggle-switch input[type="checkbox"] {
             margin-right: 8px;
-            border: 1px solid rgba(0,0,0,0.1);
         }
 
-        .controls-section {
-            margin: 15px 0;
-            padding: 15px;
-            background: #f8f9fa;
-            border-radius: 4px;
+        .control-group {
+            margin-bottom: 12px;
         }
 
         .control-label {
@@ -127,7 +78,79 @@
 
         input[type="range"] {
             width: 100%;
-            margin: 10px 0;
+            margin: 5px 0;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+            font-size: 12px;
+        }
+
+        .stat-item {
+            background: white;
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #eee;
+        }
+
+        .stat-value {
+            font-weight: 600;
+            color: #2c3e50;
+        }
+
+        .legend {
+            margin-top: 15px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 6px;
+            font-size: 12px;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+            border: 1px solid rgba(0,0,0,0.1);
+        }
+
+        .tooltip {
+            position: absolute;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 1000;
+            max-width: 200px;
+        }
+
+        .node {
+            stroke: #fff;
+            stroke-width: 1.5px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .node:hover {
+            stroke-width: 2.5px;
+        }
+
+        .link {
+            stroke: #999;
+            stroke-opacity: 0.6;
+        }
+
+        #graph {
+            width: 100vw;
+            height: 100vh;
+            background-color: #ffffff;
         }
 
         .button {
@@ -137,9 +160,9 @@
             padding: 8px 15px;
             border-radius: 4px;
             cursor: pointer;
-            font-size: 12px;
+            font-size: 13px;
             width: 100%;
-            margin: 5px 0;
+            margin-top: 10px;
         }
 
         .button:hover {
@@ -150,53 +173,85 @@
 <body>
     <div class="tooltip" style="display: none;"></div>
     <div class="controls">
-        <h3>Network Visualization</h3>
+        <h3>Network Analysis</h3>
         
-        <select id="dataset-select">
-            <option value="ieee_cis">IEEE-CIS Fraud Detection</option>
-            <option value="elliptic">Elliptic Bitcoin Network</option>
-        </select>
-
-        <div class="stats">
-            <p id="nodes-count">Nodes: 0</p>
-            <p id="edges-count">Edges: 0</p>
-            <p id="dataset-info"></p>
+        <div class="panel">
+            <div class="panel-title">Dataset Selection</div>
+            <select id="dataset-select">
+                <option value="ieee_cis">IEEE-CIS Fraud Detection</option>
+                <option value="elliptic">Elliptic Bitcoin Network</option>
+            </select>
         </div>
 
-        <div class="controls-section">
+        <div class="panel">
+            <div class="panel-title">Display Options</div>
+            <div class="toggle-switch">
+                <input type="checkbox" id="show-predictions">
+                <label for="show-predictions">Show Model Predictions</label>
+            </div>
+            <div class="toggle-switch">
+                <input type="checkbox" id="highlight-fraud" checked>
+                <label for="highlight-fraud">Highlight Fraud Cases</label>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-title">Network Settings</div>
             <div class="control-group">
                 <label class="control-label">Node Spacing</label>
-                <input type="range" id="charge-strength" min="-200" max="-10" value="-50">
+                <input type="range" id="charge-strength" min="-200" max="-10" value="-30">
             </div>
-
             <div class="control-group">
                 <label class="control-label">Link Distance</label>
                 <input type="range" id="link-distance" min="10" max="100" value="30">
             </div>
-
             <div class="control-group">
                 <label class="control-label">Node Size</label>
                 <input type="range" id="node-size" min="2" max="10" value="5">
             </div>
         </div>
 
-        <button class="button" id="reset-zoom">Reset View</button>
-        <div id="legend" class="legend"></div>
+        <div class="panel">
+            <div class="panel-title">Statistics</div>
+            <div class="stats" id="stats-container">
+                <div class="stat-item">
+                    <div>Nodes</div>
+                    <div class="stat-value" id="nodes-count">0</div>
+                </div>
+                <div class="stat-item">
+                    <div>Edges</div>
+                    <div class="stat-value" id="edges-count">0</div>
+                </div>
+                <div class="stat-item">
+                    <div>Predicted Fraud</div>
+                    <div class="stat-value" id="fraud-count">0</div>
+                </div>
+                <div class="stat-item">
+                    <div>Accuracy</div>
+                    <div class="stat-value" id="accuracy">-</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="legend" id="legend"></div>
+        <button class="button" id="reset-view">Reset View</button>
     </div>
 
     <div id="graph"></div>
 
     <script>
+        // Initialize variables
         const width = window.innerWidth;
         const height = window.innerHeight;
-        let currentDataset = 'ieee_cis';
+        let showPredictions = false;
+        let highlightFraud = true;
         
-        // Initialize SVG and container
+        // Setup SVG
         const svg = d3.select("#graph")
             .append("svg")
             .attr("width", width)
             .attr("height", height);
-            
+        
         // Add zoom behavior
         const zoom = d3.zoom()
             .scaleExtent([0.1, 4])
@@ -212,23 +267,36 @@
         // Initialize force simulation
         let simulation = d3.forceSimulation()
             .force("link", d3.forceLink().id(d => d.id).distance(30))
-            .force("charge", d3.forceManyBody().strength(-50))
+            .force("charge", d3.forceManyBody().strength(-30))
             .force("center", d3.forceCenter(width / 2, height / 2))
             .force("collide", d3.forceCollide(8));
 
+        function getNodeColor(d) {
+            if (showPredictions) {
+                return d.pred_color;
+            }
+            return d.true_color;
+        }
+
+        function getNodeOpacity(d) {
+            if (highlightFraud) {
+                return (d.group === 1 || d.predicted === true) ? 1 : 0.3;
+            }
+            return 0.7;
+        }
+
         function updateGraph(dataset) {
-            currentDataset = dataset;
-            
-            // Clear previous graph
             g.selectAll("*").remove();
             
             d3.json(`/api/graph/${dataset}`).then(function(graph) {
                 // Update statistics
-                d3.select("#nodes-count").text(`Nodes: ${graph.stats.nodeCount}`);
-                d3.select("#edges-count").text(`Edges: ${graph.stats.edgeCount}`);
-                d3.select("#dataset-info").text(`Dataset: ${dataset.toUpperCase()}`);
-
-                // Create arrow marker for directed edges
+                d3.select("#nodes-count").text(graph.stats.nodeCount);
+                d3.select("#edges-count").text(graph.stats.edgeCount);
+                d3.select("#fraud-count").text(
+                    graph.nodes.filter(d => d.predicted === true).length
+                );
+                
+                // Create arrow marker
                 g.append("defs").append("marker")
                     .attr("id", "arrowhead")
                     .attr("viewBox", "-0 -5 10 10")
@@ -247,6 +315,7 @@
                     .data(graph.edges)
                     .enter().append("line")
                     .attr("class", "link")
+                    .attr("stroke-width", 0.5)
                     .attr("marker-end", "url(#arrowhead)");
 
                 // Draw nodes
@@ -256,7 +325,8 @@
                     .enter().append("circle")
                     .attr("class", "node")
                     .attr("r", d3.select("#node-size").property("value"))
-                    .attr("fill", d => d.color)
+                    .attr("fill", getNodeColor)
+                    .attr("opacity", getNodeOpacity)
                     .call(d3.drag()
                         .on("start", dragstarted)
                         .on("drag", dragged)
@@ -271,18 +341,30 @@
                         .attr("r", +d3.select("#node-size").property("value") * 1.5);
 
                     // Show tooltip
-                    tooltip.style("display", "block")
-                        .html(`Type: ${d.type}<br>
-                              ${d.original_id ? `ID: ${d.original_id}<br>` : ''}
-                              ${d.group !== undefined ? `Group: ${d.group}` : ''}`)
+                    const tooltipContent = `
+                        Type: ${d.type}<br>
+                        ${d.original_id ? `ID: ${d.original_id}<br>` : ''}
+                        ${d.predicted !== null ? 
+                            `Predicted: ${d.predicted ? 'Fraudulent' : 'Legitimate'}<br>` : ''}
+                        ${d.group !== undefined ? 
+                            `True Label: ${d.group === 1 ? 'Fraudulent' : 
+                                        d.group === 0 ? 'Legitimate' : 'Unknown'}` : ''}
+                    `;
+
+                    d3.select(".tooltip")
+                        .style("display", "block")
+                        .html(tooltipContent)
                         .style("left", (event.pageX + 10) + "px")
                         .style("top", (event.pageY - 10) + "px");
 
                     // Highlight connected links and nodes
-                    link.style("stroke", l => 
-                        (l.source.id === d.id || l.target.id === d.id) ? "#666" : "#999")
+                    link
+                        .style("stroke", l => 
+                            (l.source.id === d.id || l.target.id === d.id) ? 
+                            "#666" : "#999")
                         .style("stroke-opacity", l => 
-                            (l.source.id === d.id || l.target.id === d.id) ? 1 : 0.6);
+                            (l.source.id === d.id || l.target.id === d.id) ? 
+                            1 : 0.6);
                 })
                 .on("mouseout", function() {
                     // Reset node size
@@ -292,10 +374,11 @@
                         .attr("r", d3.select("#node-size").property("value"));
 
                     // Hide tooltip
-                    tooltip.style("display", "none");
+                    d3.select(".tooltip").style("display", "none");
 
                     // Reset links
-                    link.style("stroke", "#999")
+                    link
+                        .style("stroke", "#999")
                         .style("stroke-opacity", 0.6);
                 });
 
@@ -317,7 +400,6 @@
                 simulation.force("link")
                     .links(graph.edges);
 
-                // Reset and restart simulation
                 simulation.alpha(1).restart();
 
                 // Update legend
@@ -327,14 +409,23 @@
 
         function updateLegend(nodes) {
             const legendDiv = d3.select("#legend");
-            legendDiv.html("<h4 style='margin-top:0;font-size:13px;'>Node Types</h4>");
+            legendDiv.html(`
+                <div class="panel-title">Legend</div>
+                <div style="font-size: 12px; margin-bottom: 8px;">
+                    ${showPredictions ? 'Showing Predictions' : 'Showing True Labels'}
+                </div>
+            `);
 
-            const types = Array.from(new Set(nodes.map(n => ({
-                type: n.type,
-                color: n.color
-            })).map(JSON.stringify))).map(JSON.parse);
+            const nodeTypes = Array.from(new Set(nodes.map(n => n.type)));
+            
+            // Add fraud/legitimate status
+            const statusTypes = [
+                {label: 'Legitimate', color: '#2ca02c'},
+                {label: 'Fraudulent', color: '#d62728'},
+                {label: 'Unknown', color: '#1f77b4'}
+            ];
 
-            types.forEach(type => {
+            statusTypes.forEach(type => {
                 const div = legendDiv.append("div")
                     .attr("class", "legend-item");
                 
@@ -343,11 +434,30 @@
                     .style("background-color", type.color);
                 
                 div.append("span")
-                    .text(type.type);
+                    .text(type.label);
             });
+
+            // Add node types if IEEE-CIS dataset
+            if (nodeTypes.includes('Transaction')) {
+                legendDiv.append("div")
+                    .attr("class", "panel-title")
+                    .style("margin-top", "10px")
+                    .text("Node Types");
+
+		    nodeTypes.forEach(type => {
+			const div = legendDiv.append("div")
+			    .attr("class", "legend-item");
+			
+			div.append("div")
+			    .attr("class", "legend-color")
+			    .style("background-color", nodes.find(n => n.type === type).true_color);
+			
+			div.append("span")
+			    .text(type);
+		    });
+            }
         }
 
-        // Event handlers
         function dragstarted(event) {
             if (!event.active) simulation.alphaTarget(0.3).restart();
             event.subject.fx = event.subject.x;
@@ -365,30 +475,51 @@
             event.subject.fy = null;
         }
 
-        // Control handlers
+        // Event Handlers
+        d3.select("#show-predictions").on("change", function() {
+            showPredictions = this.checked;
+            g.selectAll(".node")
+                .transition()
+                .duration(500)
+                .attr("fill", getNodeColor);
+            updateLegend(simulation.nodes());
+        });
+
+        d3.select("#highlight-fraud").on("change", function() {
+            highlightFraud = this.checked;
+            g.selectAll(".node")
+                .transition()
+                .duration(500)
+                .attr("opacity", getNodeOpacity);
+        });
+
         d3.select("#charge-strength").on("input", function() {
-            simulation.force("charge").strength(+this.value);
-            simulation.alpha(1).restart();
+            simulation.force("charge")
+                .strength(+this.value);
+            simulation.alpha(0.3).restart();
         });
 
         d3.select("#link-distance").on("input", function() {
-            simulation.force("link").distance(+this.value);
-            simulation.alpha(1).restart();
+            simulation.force("link")
+                .distance(+this.value);
+            simulation.alpha(0.3).restart();
         });
 
         d3.select("#node-size").on("input", function() {
-            g.selectAll(".node").attr("r", +this.value);
-        });
-
-        d3.select("#reset-zoom").on("click", function() {
-            svg.transition().duration(750).call(
-                zoom.transform,
-                d3.zoomIdentity
-            );
+            const size = +this.value;
+            g.selectAll(".node")
+                .attr("r", size);
         });
 
         d3.select("#dataset-select").on("change", function() {
             updateGraph(this.value);
+        });
+
+        d3.select("#reset-view").on("click", function() {
+            svg.transition().duration(750).call(
+                zoom.transform,
+                d3.zoomIdentity
+            );
         });
 
         // Handle window resize
@@ -400,11 +531,10 @@
                .attr("height", height);
             
             simulation.force("center", d3.forceCenter(width / 2, height / 2));
-            simulation.alpha(1).restart();
+            simulation.alpha(0.3).restart();
         });
 
-        // Initialize
-        const tooltip = d3.select(".tooltip");
+        // Initialize with default dataset
         updateGraph("ieee_cis");
     </script>
 </body>

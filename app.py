@@ -36,7 +36,22 @@ def load_model_and_data():
             cis_data_dir, edge_files, "features.csv", "TransactionID"
         )
 
-        # Store the graph and mappings
+        # Load latest IEEE-CIS model
+        cis_model_dir = sorted(glob.glob("src/cis_gnn/model/*"))[-1]
+        model_path = os.path.join(cis_model_dir, "model.pth")
+        if os.path.exists(model_path):
+            model = HeteroRGCN(
+                {ntype: g.number_of_nodes(ntype) for ntype in g.ntypes},
+                g.etypes,
+                features.shape[1],
+                16,
+                2,
+                3,
+                features.shape[1],
+            )
+            model.load_state_dict(torch.load(model_path))
+            models["ieee_cis"] = model.eval()
+
         ieee_cis_dataset = {
             "graph": g,
             "features": features,
@@ -60,6 +75,24 @@ def load_model_and_data():
             classes_path=os.path.join(elliptic_data_dir, "elliptic_txs_classes.csv"),
         )
         data = elliptic_dataset.pyg_dataset()
+
+        # Load Elliptic models
+        model_paths = {
+            "gat": "src/elliptic_gnn/results/gat_20241210_025231/gat_model.pt",
+            "gcn": "src/elliptic_gnn/results/gcn_20241210_025601/gcn_model.pt",
+            "gin": "src/elliptic_gnn/results/gin_20241210_025836/gin_model.pt",
+        }
+
+        model_classes = {"gat": GAT, "gcn": GCN, "gin": GIN}
+
+        for model_name, model_path in model_paths.items():
+            if os.path.exists(model_path):
+                model = model_classes[model_name](input_dim=data.num_features)
+                checkpoint = torch.load(model_path)
+                model.load_state_dict(checkpoint["model_state_dict"])
+                model.eval()
+                models[f"elliptic_{model_name}"] = model
+
         graphs["elliptic"] = data
 
     except Exception as e:
@@ -71,79 +104,118 @@ def load_model_and_data():
     return models, graphs
 
 
-def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
-    """Convert graph to JSON format for D3"""
+def get_predictions(dataset_type, graph_data):
+    """Get model predictions for the nodes"""
     if dataset_type == "ieee_cis":
-        # Process IEEE-CIS heterogeneous graph
+        if "ieee_cis" in models:
+            model = models["ieee_cis"]
+            with torch.no_grad():
+                pred = model(graphs["ieee_cis"], ieee_cis_dataset["features"])
+                pred_probs = torch.softmax(pred, dim=1)
+                predictions = torch.argmax(pred_probs, dim=1).cpu().numpy()
+                return predictions
+    else:  # Elliptic dataset
+        if "elliptic_gat" in models:  # Using GAT model for predictions
+            model = models["elliptic_gat"]
+            data = graphs["elliptic"].to(model.device)
+            with torch.no_grad():
+                pred_scores, pred_labels = model.test(data, labeled_only=True)
+                return pred_labels.cpu().numpy()
+    return None
+
+
+def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
+    """Convert graph to JSON format for D3 with both true labels and predictions"""
+    if dataset_type == "ieee_cis":
+        # Get predictions for IEEE-CIS dataset
+        predictions = None
+        if "ieee_cis" in models:
+            model = models["ieee_cis"]
+            with torch.no_grad():
+                pred = model(g, ieee_cis_dataset["features"])
+                pred_probs = torch.softmax(pred, dim=1)
+                predictions = torch.argmax(pred_probs, dim=1).cpu().numpy()
+
         nodes = []
         edges = []
         node_map = {}
         node_idx = 0
 
-        # First add transaction nodes (they have features)
+        # First add transaction nodes
         transaction_type = "target"
         tx_nodes = g.nodes[transaction_type].data["features"]
         n_transactions = min(sample_size // 2, tx_nodes.shape[0])
         sampled_tx = np.random.choice(tx_nodes.shape[0], n_transactions, replace=False)
 
-        # Add transaction nodes
+        # Add transaction nodes with predictions
         for idx in sampled_tx:
+            pred = predictions[idx] if predictions is not None else None
             node_map[f"{transaction_type}_{idx}"] = node_idx
             nodes.append(
                 {
                     "id": node_idx,
                     "type": "Transaction",
                     "group": 0,
-                    "color": "#1f77b4",  # blue for transactions
+                    "true_color": "#1f77b4",  # Default blue for transactions
+                    "pred_color": (
+                        "#d62728"
+                        if pred == 1
+                        else "#2ca02c" if pred == 0 else "#1f77b4"
+                    ),
+                    "predicted": bool(pred) if pred is not None else None,
                 }
             )
             node_idx += 1
 
-        # Add connected entity nodes
+        # Entity type colors
         entity_colors = {
-            "card": "#2ca02c",  # green
-            "addr": "#d62728",  # red
-            "email": "#9467bd",  # purple
-            "id": "#8c564b",  # brown
-            "device": "#e377c2",  # pink
+            "card": "#ff7f0e",  # Orange
+            "addr": "#9467bd",  # Purple
+            "email": "#8c564b",  # Brown
+            "id": "#e377c2",  # Pink
+            "device": "#7f7f7f",  # Gray
+            "ProductCD": "#bcbd22",  # Yellow-green
+            "target": "#17becf",  # Cyan
         }
 
+        # Add connected entity nodes
         for etype in g.canonical_etypes:
             src, rel, dst = etype
             if src == transaction_type or dst == transaction_type:
                 u, v = g.edges(etype=rel)
+                u = u.cpu().numpy()
+                v = v.cpu().numpy()
+
                 for i in range(len(u)):
-                    src_node = f"{src}_{u[i].item()}"
-                    dst_node = f"{dst}_{v[i].item()}"
+                    src_key = f"{src}_{u[i]}"
+                    dst_key = f"{dst}_{v[i]}"
 
                     # Add source node if not exists
-                    if src_node not in node_map:
-                        node_map[src_node] = node_idx
-                        color = next(
-                            (c for k, c in entity_colors.items() if k in src), "#aec7e8"
-                        )
+                    if src_key not in node_map:
+                        node_map[src_key] = node_idx
+                        color = entity_colors.get(src, "#aec7e8")
                         nodes.append(
                             {
                                 "id": node_idx,
                                 "type": src,
-                                "group": len(nodes) % 5 + 1,
-                                "color": color,
+                                "group": g.ntypes.index(src),
+                                "true_color": color,
+                                "pred_color": color,
                             }
                         )
                         node_idx += 1
 
                     # Add target node if not exists
-                    if dst_node not in node_map:
-                        node_map[dst_node] = node_idx
-                        color = next(
-                            (c for k, c in entity_colors.items() if k in dst), "#aec7e8"
-                        )
+                    if dst_key not in node_map:
+                        node_map[dst_key] = node_idx
+                        color = entity_colors.get(dst, "#aec7e8")
                         nodes.append(
                             {
                                 "id": node_idx,
                                 "type": dst,
-                                "group": len(nodes) % 5 + 1,
-                                "color": color,
+                                "group": g.ntypes.index(dst),
+                                "true_color": color,
+                                "pred_color": color,
                             }
                         )
                         node_idx += 1
@@ -151,8 +223,8 @@ def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
                     # Add edge
                     edges.append(
                         {
-                            "source": node_map[src_node],
-                            "target": node_map[dst_node],
+                            "source": node_map[src_key],
+                            "target": node_map[dst_key],
                             "type": rel,
                         }
                     )
@@ -161,36 +233,51 @@ def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
                         break
 
     else:  # Elliptic dataset
-        if not hasattr(g, "merged_df"):
-            return {"nodes": [], "edges": []}
+        # Get predictions from GAT model
+        predictions = None
+        if "elliptic_gat" in models:
+            model = models["elliptic_gat"]
+            data = graphs["elliptic"].to(model.device)
+            with torch.no_grad():
+                pred_scores, predictions = model.test(data, labeled_only=True)
+                predictions = predictions.cpu().numpy()
 
         # Get nodes for the specific time step
         node_list = g.merged_df.index[g.merged_df.loc[:, 1] == time_step].tolist()
 
-        # Create nodes
+        # Create nodes with true labels and predictions
         nodes = []
         node_map = {}
 
         for idx, node_id in enumerate(node_list):
             node_map[node_id] = idx
+            pred = predictions[node_id] if predictions is not None else None
 
+            # Set true color based on actual label
             if node_id in g.illicit_ids:
-                color = "#d62728"  # red for fraud
+                true_color = "#d62728"  # Red for true fraud
                 group = 1
             elif node_id in g.licit_ids:
-                color = "#2ca02c"  # green for legitimate
+                true_color = "#2ca02c"  # Green for true legitimate
                 group = 0
             else:
-                color = "#1f77b4"  # blue for unknown
+                true_color = "#1f77b4"  # Blue for unknown
                 group = 2
+
+            # Set predicted color
+            pred_color = (
+                "#d62728" if pred == 1 else "#2ca02c" if pred == 0 else "#1f77b4"
+            )
 
             nodes.append(
                 {
                     "id": idx,
                     "original_id": int(node_id),
                     "group": group,
-                    "color": color,
+                    "true_color": true_color,
+                    "pred_color": pred_color,
                     "type": "Transaction",
+                    "predicted": bool(pred) if pred is not None else None,
                 }
             )
 
@@ -198,23 +285,25 @@ def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
         edges = []
         edge_index = g.edge_index.cpu().numpy()
 
-        for row in edge_index.T:
-            source, target = row[0], row[1]
+        for i in range(edge_index.shape[1]):
+            source, target = edge_index[0, i], edge_index[1, i]
             if source in node_map and target in node_map:
                 edges.append({"source": node_map[source], "target": node_map[target]})
 
-            if len(edges) >= sample_size:
+            if len(edges) >= sample_size * 2:
                 break
 
-    return {
-        "nodes": nodes,
-        "edges": edges,
-        "stats": {
-            "nodeCount": len(nodes),
-            "edgeCount": len(edges),
-            "nodeTypes": list(set(n["type"] for n in nodes)),
+    stats = {
+        "nodeCount": len(nodes),
+        "edgeCount": len(edges),
+        "nodeTypes": list(set(n["type"] for n in nodes)),
+        "predictionStats": {
+            "total": len(nodes),
+            "predicted": sum(1 for n in nodes if n.get("predicted") is not None),
         },
     }
+
+    return {"nodes": nodes, "edges": edges, "stats": stats}
 
 
 @app.route("/")
