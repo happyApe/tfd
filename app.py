@@ -2,6 +2,7 @@
 import glob
 import json
 import os
+
 # Add parent directory to path to import from src
 import sys
 from datetime import datetime
@@ -110,17 +111,22 @@ def load_model_and_data():
 
 
 def convert_graph_to_json(g, dataset_type, sample_size=1000):
-    """Convert graph to JSON format for D3 with sampling for large graphs"""
+    """Convert graph to JSON format for D3"""
+
+    def tensor_to_list(tensor):
+        """Convert a tensor to a Python list"""
+        if isinstance(tensor, torch.Tensor):
+            return tensor.cpu().detach().numpy().tolist()
+        return tensor
+
     if dataset_type == "ieee_cis":
         # Convert heterogeneous graph with sampling
-        nx_g = nx.Graph()
         nodes = []
         edges = []
+        node_map = {}
+        node_idx = 0
 
         # Sample nodes from each type
-        node_idx = 0
-        node_map = {}
-
         for ntype in g.ntypes:
             n_type_nodes = g.number_of_nodes(ntype)
             sample_size_type = min(sample_size // len(g.ntypes), n_type_nodes)
@@ -129,60 +135,62 @@ def convert_graph_to_json(g, dataset_type, sample_size=1000):
             for i in sampled_indices:
                 node_map[f"{ntype}_{i.item()}"] = node_idx
                 nodes.append(
-                    {"id": node_idx, "type": ntype, "group": g.ntypes.index(ntype)}
+                    {
+                        "id": int(node_idx),  # Convert to int
+                        "type": str(ntype),
+                        "group": g.ntypes.index(ntype),
+                    }
                 )
                 node_idx += 1
 
-        # Sample edges between sampled nodes
+        # Sample edges
         for etype in g.canonical_etypes:
             src, rel, dst = etype
             u, v = g.edges(etype=rel)
-            edge_mask = torch.zeros(len(u), dtype=torch.bool)
+            edge_count = 0
 
-            for i, (src_idx, dst_idx) in enumerate(zip(u, v)):
-                src_key = f"{src}_{src_idx.item()}"
-                dst_key = f"{dst}_{dst_idx.item()}"
-                if src_key in node_map and dst_key in node_map:
-                    edge_mask[i] = True
-
-            sampled_edges = torch.where(edge_mask)[0][
-                : sample_size // len(g.canonical_etypes)
-            ]
-
-            for i in sampled_edges:
+            for i in range(min(len(u), sample_size // len(g.canonical_etypes))):
                 src_key = f"{src}_{u[i].item()}"
                 dst_key = f"{dst}_{v[i].item()}"
-                edges.append(
-                    {
-                        "source": node_map[src_key],
-                        "target": node_map[dst_key],
-                        "type": rel,
-                    }
-                )
+
+                if src_key in node_map and dst_key in node_map:
+                    edges.append(
+                        {
+                            "source": int(node_map[src_key]),  # Convert to int
+                            "target": int(node_map[dst_key]),
+                            "type": str(rel),
+                        }
+                    )
+                    edge_count += 1
+
+                if edge_count >= sample_size // len(g.canonical_etypes):
+                    break
 
     else:  # Elliptic dataset
         # Sample nodes
         n_nodes = g.num_nodes
         sampled_nodes = torch.randperm(n_nodes)[:sample_size]
-        nodes = [{"id": i, "group": int(g.y[i].item())} for i in sampled_nodes]
+        nodes = []
+        node_map = {}
 
-        # Sample edges between sampled nodes
+        # Create nodes with integer indices
+        for i, node_idx in enumerate(sampled_nodes):
+            node_map[node_idx.item()] = i
+            nodes.append({"id": i, "group": int(tensor_to_list(g.y[node_idx]))})
+
+        # Create edges between sampled nodes
+        edges = []
         edge_index = g.edge_index
-        edge_mask = torch.zeros(edge_index.size(1), dtype=torch.bool)
-        node_set = set(sampled_nodes.tolist())
 
         for i in range(edge_index.size(1)):
-            if (
-                edge_index[0, i].item() in node_set
-                and edge_index[1, i].item() in node_set
-            ):
-                edge_mask[i] = True
+            src = edge_index[0, i].item()
+            dst = edge_index[1, i].item()
 
-        sampled_edges = torch.where(edge_mask)[0][: sample_size * 2]
-        edges = [
-            {"source": edge_index[0, i].item(), "target": edge_index[1, i].item()}
-            for i in sampled_edges
-        ]
+            if src in node_map and dst in node_map:
+                edges.append({"source": node_map[src], "target": node_map[dst]})
+
+            if len(edges) >= sample_size * 2:  # Limit number of edges
+                break
 
     return {"nodes": nodes, "edges": edges}
 
@@ -194,9 +202,17 @@ def index():
 
 @app.route("/api/graph/<dataset>")
 def get_graph(dataset):
-    if dataset in graphs:
-        return jsonify(convert_graph_to_json(graphs[dataset], dataset))
-    return jsonify({"error": "Dataset not found"}), 404
+    try:
+        if dataset in graphs:
+            graph_data = convert_graph_to_json(graphs[dataset], dataset)
+            return jsonify(graph_data)
+        return jsonify({"error": "Dataset not found"}), 404
+    except Exception as e:
+        print(f"Error converting graph to JSON: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
