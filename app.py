@@ -38,19 +38,21 @@ def load_model_and_data():
     # Load IEEE-CIS data and model
     try:
         # Correct paths for IEEE-CIS
-        cis_data_dir = "src/cis_gnn/data/"
+        cis_data_dir = "src/cis_gnn/data/ieee_cis_clean/"  # Update this path
         edge_files = glob.glob(os.path.join(cis_data_dir, "relation*"))
-        edge_files = [os.path.basename(f) for f in edge_files]
+        if edge_files:  # Only proceed if we found edge files
+            edge_files = [os.path.basename(f) for f in edge_files]
 
-        g, features, target_id_to_node, id_to_node = construct_graph(
-            cis_data_dir, edge_files, "features.csv", "TransactionID"
-        )
+            g, features, target_id_to_node, id_to_node = construct_graph(
+                cis_data_dir, edge_files, "features.csv", "TransactionID"
+            )
 
-        # Find latest model directory
-        cis_model_dir = get_latest_model_path("src/cis_gnn/model/")
-        if cis_model_dir:
-            model_path = os.path.join(cis_model_dir, "model.pth")
-            if os.path.exists(model_path):
+            # Find latest model directory
+            cis_model_dir = get_latest_model_path("src/cis_gnn/model/")
+            if cis_model_dir and os.path.exists(
+                os.path.join(cis_model_dir, "model.pth")
+            ):
+                model_path = os.path.join(cis_model_dir, "model.pth")
                 model = HeteroRGCN(
                     {ntype: g.number_of_nodes(ntype) for ntype in g.ntypes},
                     g.etypes,
@@ -69,7 +71,9 @@ def load_model_and_data():
     # Load Elliptic data and models
     try:
         # Update Elliptic dataset path
-        elliptic_data_dir = "src/elliptic_gnn/data/"
+        elliptic_data_dir = (
+            "src/elliptic_gnn/data/elliptic_bitcoin_dataset/"  # Updated path
+        )
         elliptic_dataset = EllipticDataset(
             features_path=os.path.join(elliptic_data_dir, "elliptic_txs_features.csv"),
             edges_path=os.path.join(elliptic_data_dir, "elliptic_txs_edgelist.csv"),
@@ -77,23 +81,26 @@ def load_model_and_data():
         )
         data = elliptic_dataset.pyg_dataset()
 
-        # Load models
-        model_types = {
-            "gat": ("gat_20241210_025231", GAT),
-            "gcn": ("gcn_20241210_025601", GCN),
-            "gin": ("gin_20241210_025836", GIN),
+        # Load models from results directory
+        model_paths = {
+            "gat": "src/elliptic_gnn/results/gat_20241210_025231",
+            "gcn": "src/elliptic_gnn/results/gcn_20241210_025601",
+            "gin": "src/elliptic_gnn/results/gin_20241210_025836",
         }
 
-        for model_name, (folder_name, model_class) in model_types.items():
-            model_path = f"src/elliptic_gnn/results/{folder_name}/{model_name}_model.pt"
+        model_classes = {"gat": GAT, "gcn": GCN, "gin": GIN}
+
+        for model_name, result_dir in model_paths.items():
+            model_path = os.path.join(result_dir, f"{model_name}_model.pt")
             if os.path.exists(model_path):
-                model = model_class(input_dim=data.num_features)
+                model = model_classes[model_name](input_dim=data.num_features)
                 model.load_state_dict(torch.load(model_path))
                 models[f"elliptic_{model_name}"] = model
 
         graphs["elliptic"] = data
     except Exception as e:
         print(f"Error loading Elliptic data: {e}")
+        print(f"Attempted paths: {elliptic_data_dir}")
 
     return models, graphs
 
