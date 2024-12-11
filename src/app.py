@@ -1,11 +1,18 @@
 # app.py
+import glob
 import json
 import os
+
+# Add parent directory to path to import from src
+import sys
+from datetime import datetime
 
 import dgl
 import networkx as nx
 import torch
 from flask import Flask, jsonify, render_template
+
+sys.path.append("src")
 
 from cis_gnn.graph_utils import construct_graph
 from cis_gnn.model import HeteroRGCN
@@ -15,44 +22,70 @@ from elliptic_gnn.models import GAT, GCN, GIN
 app = Flask(__name__)
 
 
+def get_latest_model_path(base_path):
+    """Get the latest model path based on timestamp in directory name"""
+    dirs = glob.glob(os.path.join(base_path, "*"))
+    if not dirs:
+        return None
+    latest_dir = max(dirs, key=os.path.getctime)
+    return latest_dir
+
+
 def load_model_and_data():
     models = {}
     graphs = {}
 
     # Load IEEE-CIS data and model
     try:
-        cis_data_dir = "data/ieee_cis_clean/"
+        # Correct paths for IEEE-CIS
+        cis_data_dir = "src/cis_gnn/data/"
+        edge_files = glob.glob(os.path.join(cis_data_dir, "relation*"))
+        edge_files = [os.path.basename(f) for f in edge_files]
+
         g, features, target_id_to_node, id_to_node = construct_graph(
-            cis_data_dir, ["relation*"], "features.csv", "TransactionID"
+            cis_data_dir, edge_files, "features.csv", "TransactionID"
         )
 
-        # Load model
-        model_path = "model/ieee_cis/model.pth"
-        if os.path.exists(model_path):
-            model = HeteroRGCN(
-                {ntype: g.number_of_nodes(ntype) for ntype in g.ntypes},
-                g.etypes,
-                features.shape[1],
-                16,
-                2,
-                3,
-                features.shape[1],
-            )
-            model.load_state_dict(torch.load(model_path))
-            models["ieee_cis"] = model
-            graphs["ieee_cis"] = g
+        # Find latest model directory
+        cis_model_dir = get_latest_model_path("src/cis_gnn/model/")
+        if cis_model_dir:
+            model_path = os.path.join(cis_model_dir, "model.pth")
+            if os.path.exists(model_path):
+                model = HeteroRGCN(
+                    {ntype: g.number_of_nodes(ntype) for ntype in g.ntypes},
+                    g.etypes,
+                    features.shape[1],
+                    16,
+                    2,
+                    3,
+                    features.shape[1],
+                )
+                model.load_state_dict(torch.load(model_path))
+                models["ieee_cis"] = model
+                graphs["ieee_cis"] = g
     except Exception as e:
         print(f"Error loading IEEE-CIS data: {e}")
 
     # Load Elliptic data and models
     try:
-        elliptic_dataset = EllipticDataset()
+        # Update Elliptic dataset path
+        elliptic_data_dir = "src/elliptic_gnn/data/"
+        elliptic_dataset = EllipticDataset(
+            features_path=os.path.join(elliptic_data_dir, "elliptic_txs_features.csv"),
+            edges_path=os.path.join(elliptic_data_dir, "elliptic_txs_edgelist.csv"),
+            classes_path=os.path.join(elliptic_data_dir, "elliptic_txs_classes.csv"),
+        )
         data = elliptic_dataset.pyg_dataset()
 
-        model_types = {"gat": GAT, "gcn": GCN, "gin": GIN}
+        # Load models
+        model_types = {
+            "gat": ("gat_20241210_025231", GAT),
+            "gcn": ("gcn_20241210_025601", GCN),
+            "gin": ("gin_20241210_025836", GIN),
+        }
 
-        for model_name, model_class in model_types.items():
-            model_path = f"results/{model_name}_model.pt"
+        for model_name, (folder_name, model_class) in model_types.items():
+            model_path = f"src/elliptic_gnn/results/{folder_name}/{model_name}_model.pt"
             if os.path.exists(model_path):
                 model = model_class(input_dim=data.num_features)
                 model.load_state_dict(torch.load(model_path))
@@ -65,46 +98,79 @@ def load_model_and_data():
     return models, graphs
 
 
-models, graphs = load_model_and_data()
-
-
-def convert_graph_to_json(g, dataset_type):
-    """Convert graph to JSON format for D3"""
+def convert_graph_to_json(g, dataset_type, sample_size=1000):
+    """Convert graph to JSON format for D3 with sampling for large graphs"""
     if dataset_type == "ieee_cis":
-        # Convert heterogeneous graph
+        # Convert heterogeneous graph with sampling
         nx_g = nx.Graph()
         nodes = []
         edges = []
 
-        # Add nodes
+        # Sample nodes from each type
         node_idx = 0
         node_map = {}
 
         for ntype in g.ntypes:
-            for i in range(g.number_of_nodes(ntype)):
-                node_map[f"{ntype}_{i}"] = node_idx
+            n_type_nodes = g.number_of_nodes(ntype)
+            sample_size_type = min(sample_size // len(g.ntypes), n_type_nodes)
+            sampled_indices = torch.randperm(n_type_nodes)[:sample_size_type]
+
+            for i in sampled_indices:
+                node_map[f"{ntype}_{i.item()}"] = node_idx
                 nodes.append(
                     {"id": node_idx, "type": ntype, "group": g.ntypes.index(ntype)}
                 )
                 node_idx += 1
 
-        # Add edges
+        # Sample edges between sampled nodes
         for etype in g.canonical_etypes:
             src, rel, dst = etype
             u, v = g.edges(etype=rel)
-            for i in range(len(u)):
+            edge_mask = torch.zeros(len(u), dtype=torch.bool)
+
+            for i, (src_idx, dst_idx) in enumerate(zip(u, v)):
+                src_key = f"{src}_{src_idx.item()}"
+                dst_key = f"{dst}_{dst_idx.item()}"
+                if src_key in node_map and dst_key in node_map:
+                    edge_mask[i] = True
+
+            sampled_edges = torch.where(edge_mask)[0][
+                : sample_size // len(g.canonical_etypes)
+            ]
+
+            for i in sampled_edges:
+                src_key = f"{src}_{u[i].item()}"
+                dst_key = f"{dst}_{v[i].item()}"
                 edges.append(
                     {
-                        "source": node_map[f"{src}_{u[i].item()}"],
-                        "target": node_map[f"{dst}_{v[i].item()}"],
+                        "source": node_map[src_key],
+                        "target": node_map[dst_key],
                         "type": rel,
                     }
                 )
 
     else:  # Elliptic dataset
-        nodes = [{"id": i, "group": int(g.y[i].item())} for i in range(g.num_nodes)]
+        # Sample nodes
+        n_nodes = g.num_nodes
+        sampled_nodes = torch.randperm(n_nodes)[:sample_size]
+        nodes = [{"id": i, "group": int(g.y[i].item())} for i in sampled_nodes]
+
+        # Sample edges between sampled nodes
+        edge_index = g.edge_index
+        edge_mask = torch.zeros(edge_index.size(1), dtype=torch.bool)
+        node_set = set(sampled_nodes.tolist())
+
+        for i in range(edge_index.size(1)):
+            if (
+                edge_index[0, i].item() in node_set
+                and edge_index[1, i].item() in node_set
+            ):
+                edge_mask[i] = True
+
+        sampled_edges = torch.where(edge_mask)[0][: sample_size * 2]
         edges = [
-            {"source": u.item(), "target": v.item()} for u, v in zip(*g.edge_index)
+            {"source": edge_index[0, i].item(), "target": edge_index[1, i].item()}
+            for i in sampled_edges
         ]
 
     return {"nodes": nodes, "edges": edges}
@@ -123,4 +189,9 @@ def get_graph(dataset):
 
 
 if __name__ == "__main__":
+    # Load models and graphs globally
+    print("Loading models and graphs...")
+    models, graphs = load_model_and_data()
+    print("Loaded models:", list(models.keys()))
+    print("Loaded graphs:", list(graphs.keys()))
     app.run(debug=True)
