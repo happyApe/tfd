@@ -9,6 +9,7 @@ from datetime import datetime
 
 import dgl
 import networkx as nx
+import numpy as np
 import torch
 from flask import Flask, jsonify, render_template
 
