@@ -6,7 +6,8 @@ import dgl
 import numpy as np
 import pandas as pd
 import torch
-from utils import get_logger
+
+from .utils import get_logger
 
 
 def get_features(id_to_node, node_features, device):
