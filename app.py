@@ -112,84 +112,81 @@ def load_model_and_data():
 
 def convert_graph_to_json(g, dataset_type, sample_size=1000):
     """Convert graph to JSON format for D3"""
-
-    def tensor_to_list(tensor):
-        """Convert a tensor to a Python list"""
-        if isinstance(tensor, torch.Tensor):
-            return tensor.cpu().detach().numpy().tolist()
-        return tensor
-
     if dataset_type == "ieee_cis":
-        # Convert heterogeneous graph with sampling
         nodes = []
         edges = []
         node_map = {}
         node_idx = 0
 
-        # Sample nodes from each type
-        for ntype in g.ntypes:
-            n_type_nodes = g.number_of_nodes(ntype)
-            sample_size_type = min(sample_size // len(g.ntypes), n_type_nodes)
-            sampled_indices = torch.randperm(n_type_nodes)[:sample_size_type]
-
-            for i in sampled_indices:
-                node_map[f"{ntype}_{i.item()}"] = node_idx
-                nodes.append(
-                    {
-                        "id": int(node_idx),  # Convert to int
-                        "type": str(ntype),
-                        "group": g.ntypes.index(ntype),
-                    }
-                )
-                node_idx += 1
-
-        # Sample edges
+        # First pass: collect all nodes that are part of edges
+        edge_connected_nodes = set()
         for etype in g.canonical_etypes:
             src, rel, dst = etype
             u, v = g.edges(etype=rel)
-            edge_count = 0
+            edge_connected_nodes.update(f"{src}_{i.item()}" for i in u)
+            edge_connected_nodes.update(f"{dst}_{i.item()}" for i in v)
 
-            for i in range(min(len(u), sample_size // len(g.canonical_etypes))):
+        # Add connected nodes first
+        connected_nodes = list(edge_connected_nodes)
+        np.random.shuffle(connected_nodes)
+        for node_key in connected_nodes[:sample_size]:
+            ntype, idx = node_key.split("_")
+            node_map[node_key] = node_idx
+            nodes.append(
+                {"id": node_idx, "type": ntype, "group": g.ntypes.index(ntype)}
+            )
+            node_idx += 1
+
+        # Add edges between sampled nodes
+        for etype in g.canonical_etypes:
+            src, rel, dst = etype
+            u, v = g.edges(etype=rel)
+
+            for i in range(len(u)):
                 src_key = f"{src}_{u[i].item()}"
                 dst_key = f"{dst}_{v[i].item()}"
 
                 if src_key in node_map and dst_key in node_map:
                     edges.append(
                         {
-                            "source": int(node_map[src_key]),  # Convert to int
-                            "target": int(node_map[dst_key]),
-                            "type": str(rel),
+                            "source": node_map[src_key],
+                            "target": node_map[dst_key],
+                            "type": rel,
                         }
                     )
-                    edge_count += 1
 
-                if edge_count >= sample_size // len(g.canonical_etypes):
+                if len(edges) >= sample_size * 2:  # Limit number of edges
                     break
 
     else:  # Elliptic dataset
-        # Sample nodes
-        n_nodes = g.num_nodes
-        sampled_nodes = torch.randperm(n_nodes)[:sample_size]
-        nodes = []
-        node_map = {}
+        # Get edge index and labels
+        edge_index = g.edge_index.cpu().numpy()
+        labels = g.y.cpu().numpy()
 
-        # Create nodes with integer indices
-        for i, node_idx in enumerate(sampled_nodes):
-            node_map[node_idx.item()] = i
-            nodes.append({"id": i, "group": int(tensor_to_list(g.y[node_idx]))})
+        # First get connected nodes
+        unique_nodes = np.unique(edge_index)
+        sampled_nodes = np.random.choice(
+            unique_nodes, size=min(sample_size, len(unique_nodes)), replace=False
+        )
 
-        # Create edges between sampled nodes
+        # Create node mapping
+        node_map = {int(node): idx for idx, node in enumerate(sampled_nodes)}
+
+        # Create nodes
+        nodes = [
+            {"id": idx, "group": int(labels[node])} for node, idx in node_map.items()
+        ]
+
+        # Create edges only between sampled nodes
         edges = []
-        edge_index = g.edge_index
+        for i in range(edge_index.shape[1]):
+            source = int(edge_index[0, i])
+            target = int(edge_index[1, i])
 
-        for i in range(edge_index.size(1)):
-            src = edge_index[0, i].item()
-            dst = edge_index[1, i].item()
+            if source in node_map and target in node_map:
+                edges.append({"source": node_map[source], "target": node_map[target]})
 
-            if src in node_map and dst in node_map:
-                edges.append({"source": node_map[src], "target": node_map[dst]})
-
-            if len(edges) >= sample_size * 2:  # Limit number of edges
+            if len(edges) >= sample_size * 2:
                 break
 
     return {"nodes": nodes, "edges": edges}
