@@ -68,12 +68,9 @@ def load_model_and_data():
     except Exception as e:
         print(f"Error loading IEEE-CIS data: {e}")
 
-    # Load Elliptic data and models
     try:
-        # Update Elliptic dataset path
-        elliptic_data_dir = (
-            "src/elliptic_gnn/data/elliptic_bitcoin_dataset/"  # Updated path
-        )
+        # Load dataset
+        elliptic_data_dir = "src/elliptic_gnn/data/elliptic_bitcoin_dataset/"
         elliptic_dataset = EllipticDataset(
             features_path=os.path.join(elliptic_data_dir, "elliptic_txs_features.csv"),
             edges_path=os.path.join(elliptic_data_dir, "elliptic_txs_edgelist.csv"),
@@ -93,14 +90,22 @@ def load_model_and_data():
         for model_name, result_dir in model_paths.items():
             model_path = os.path.join(result_dir, f"{model_name}_model.pt")
             if os.path.exists(model_path):
+                # Load the full checkpoint
+                checkpoint = torch.load(model_path)
+
+                # Initialize the model
                 model = model_classes[model_name](input_dim=data.num_features)
-                model.load_state_dict(torch.load(model_path))
+
+                # Load just the model state dict
+                model.load_state_dict(checkpoint["model_state_dict"])
                 models[f"elliptic_{model_name}"] = model
 
         graphs["elliptic"] = data
     except Exception as e:
         print(f"Error loading Elliptic data: {e}")
-        print(f"Attempted paths: {elliptic_data_dir}")
+        import traceback
+
+        traceback.print_exc()  # This will print the full error traceback
 
     return models, graphs
 
