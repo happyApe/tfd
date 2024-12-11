@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Fraud Detection Graph Visualization</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+    <style>
+        .node {
+            stroke: #fff;
+            stroke-width: 1.5px;
+        }
+        
+        .link {
+            stroke: #999;
+            stroke-opacity: 0.6;
+        }
+        
+        .controls {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        }
+        
+        #graph {
+            width: 100vw;
+            height: 100vh;
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <h3>Graph Visualization</h3>
+        <select id="dataset-select">
+            <option value="ieee_cis">IEEE-CIS Dataset</option>
+            <option value="elliptic">Elliptic Dataset</option>
+        </select>
+        <div id="legend"></div>
+    </div>
+    <div id="graph"></div>
+
+    <script>
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        
+        const color = d3.scaleOrdinal(d3.schemeCategory10);
+        
+        // Initialize force simulation
+        const simulation = d3.forceSimulation()
+            .force("link", d3.forceLink().id(d => d.id))
+            .force("charge", d3.forceManyBody())
+            .force("center", d3.forceCenter(width / 2, height / 2));
+        
+        // Create SVG container
+        const svg = d3.select("#graph")
+            .append("svg")
+            .attr("width", width)
+            .attr("height", height);
+        
+        // Create legend
+        function updateLegend(dataset) {
+            const legendDiv = d3.select("#legend");
+            legendDiv.html("");
+            
+            if (dataset === "ieee_cis") {
+                const nodeTypes = ["Transaction", "Card", "Merchant"];
+                nodeTypes.forEach(type => {
+                    legendDiv.append("div")
+                        .style("color", color(nodeTypes.indexOf(type)))
+                        .text(type);
+                });
+            } else {
+                legendDiv.append("div")
+                    .style("color", color(0))
+                    .text("Legitimate");
+                legendDiv.append("div")
+                    .style("color", color(1))
+                    .text("Fraudulent");
+            }
+        }
+        
+        // Load and display graph
+        function updateGraph(dataset) {
+            d3.json(`/api/graph/${dataset}`).then(function(graph) {
+                // Clear previous graph
+                svg.selectAll("*").remove();
+                
+                // Create arrow marker for directed edges
+                svg.append("defs").append("marker")
+                    .attr("id", "arrowhead")
+                    .attr("viewBox", "-0 -5 10 10")
+                    .attr("refX", 15)
+                    .attr("refY", 0)
+                    .attr("orient", "auto")
+                    .attr("markerWidth", 6)
+                    .attr("markerHeight", 6)
+                    .attr("xoverflow", "visible")
+                    .append("svg:path")
+                    .attr("d", "M 0,-5 L 10 ,0 L 0,5")
+                    .attr("fill", "#999")
+                    .style("stroke", "none");
+                
+                // Draw edges
+                const link = svg.append("g")
+                    .selectAll("line")
+                    .data(graph.edges)
+                    .enter().append("line")
+                    .attr("class", "link")
+                    .attr("marker-end", "url(#arrowhead)");
+                
+                // Draw nodes
+                const node = svg.append("g")
+                    .selectAll("circle")
+                    .data(graph.nodes)
+                    .enter().append("circle")
+                    .attr("class", "node")
+                    .attr("r", 5)
+                    .attr("fill", d => color(d.group))
+                    .call(d3.drag()
+                        .on("start", dragstarted)
+                        .on("drag", dragged)
+                        .on("end", dragended));
+                
+                // Add tooltips
+                node.append("title")
+                    .text(d => `ID: ${d.id}, Type: ${d.type || (d.group ? 'Fraudulent' : 'Legitimate')}`);
+                
+                // Update force simulation
+                simulation
+                    .nodes(graph.nodes)
+                    .on("tick", ticked);
+                
+                simulation.force("link")
+                    .links(graph.edges);
+                
+                // Tick function to update positions
+                function ticked() {
+                    link
+                        .attr("x1", d => d.source.x)
+                        .attr("y1", d => d.source.y)
+                        .attr("x2", d => d.target.x)
+                        .attr("y2", d => d.target.y);
+                    
+                    node
+                        .attr("cx", d => d.x)
+                        .attr("cy", d => d.y);
+                }
+                
+                // Update legend
+                updateLegend(dataset);
+            });
+        }
+        
+        // Drag functions
+        function dragstarted(event) {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            event.subject.fx = event.subject.x;
+            event.subject.fy = event.subject.y;
+        }
+        
+        function dragged(event) {
+            event.subject.fx = event.x;
+            event.subject.fy = event.y;
+        }
+        
+        function dragended(event) {
+            if (!event.active) simulation.alphaTarget(0);
+            event.subject.fx = null;
+            event.subject.fy = null;
+        }
+        
+        // Dataset selection handler
+        d3.select("#dataset-select").on("change", function() {
+            updateGraph(this.value);
+        });
+        
+        // Initial load
+        updateGraph("ieee_cis");
+    </script>
+</body>
+</html>
