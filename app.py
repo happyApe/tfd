@@ -114,81 +114,123 @@ def load_model_and_data():
 def convert_graph_to_json(g, dataset_type, sample_size=1000):
     """Convert graph to JSON format for D3"""
     if dataset_type == "ieee_cis":
+        # IEEE-CIS: Focus on transactions and their connections
         nodes = []
         edges = []
         node_map = {}
         node_idx = 0
 
-        # First pass: collect all nodes that are part of edges
-        edge_connected_nodes = set()
-        for etype in g.canonical_etypes:
-            src, rel, dst = etype
-            u, v = g.edges(etype=rel)
-            edge_connected_nodes.update(f"{src}_{i.item()}" for i in u)
-            edge_connected_nodes.update(f"{dst}_{i.item()}" for i in v)
+        # Get all transaction nodes first
+        transaction_type = (
+            "target"  # This is how transactions are labeled in the HeteroRGCN
+        )
+        n_transactions = g.number_of_nodes(transaction_type)
+        sampled_transactions = np.random.choice(
+            n_transactions, size=min(sample_size // 2, n_transactions), replace=False
+        )
 
-        # Add connected nodes first
-        connected_nodes = list(edge_connected_nodes)
-        np.random.shuffle(connected_nodes)
-        for node_key in connected_nodes[:sample_size]:
-            ntype, idx = node_key.split("_")
-            node_map[node_key] = node_idx
-            nodes.append(
-                {"id": node_idx, "type": ntype, "group": g.ntypes.index(ntype)}
-            )
+        # Add transaction nodes
+        for idx in sampled_transactions:
+            node_map[f"{transaction_type}_{idx}"] = node_idx
+            nodes.append({"id": node_idx, "type": "Transaction", "group": 0})
             node_idx += 1
 
-        # Add edges between sampled nodes
+        # Add connected nodes from other types
         for etype in g.canonical_etypes:
             src, rel, dst = etype
-            u, v = g.edges(etype=rel)
+            if src == transaction_type or dst == transaction_type:
+                u, v = g.edges(etype=rel)
+                u = u.cpu().numpy()
+                v = v.cpu().numpy()
 
-            for i in range(len(u)):
-                src_key = f"{src}_{u[i].item()}"
-                dst_key = f"{dst}_{v[i].item()}"
+                for i in range(len(u)):
+                    if f"{src}_{u[i]}" in node_map or f"{dst}_{v[i]}" in node_map:
+                        # Add source node if not exists
+                        if f"{src}_{u[i]}" not in node_map:
+                            node_map[f"{src}_{u[i]}"] = node_idx
+                            nodes.append(
+                                {
+                                    "id": node_idx,
+                                    "type": src,
+                                    "group": g.ntypes.index(src),
+                                }
+                            )
+                            node_idx += 1
 
-                if src_key in node_map and dst_key in node_map:
-                    edges.append(
-                        {
-                            "source": node_map[src_key],
-                            "target": node_map[dst_key],
-                            "type": rel,
-                        }
-                    )
+                        # Add target node if not exists
+                        if f"{dst}_{v[i]}" not in node_map:
+                            node_map[f"{dst}_{v[i]}"] = node_idx
+                            nodes.append(
+                                {
+                                    "id": node_idx,
+                                    "type": dst,
+                                    "group": g.ntypes.index(dst),
+                                }
+                            )
+                            node_idx += 1
 
-                if len(edges) >= sample_size * 2:  # Limit number of edges
-                    break
+                        # Add edge
+                        edges.append(
+                            {
+                                "source": node_map[f"{src}_{u[i]}"],
+                                "target": node_map[f"{dst}_{v[i]}"],
+                                "type": rel,
+                            }
+                        )
 
     else:  # Elliptic dataset
-        # Get edge index and labels
+        nodes = []
+        edges = []
+        node_map = {}
+
+        # Get edge index and convert to numpy for easier handling
         edge_index = g.edge_index.cpu().numpy()
         labels = g.y.cpu().numpy()
 
-        # First get connected nodes
-        unique_nodes = np.unique(edge_index)
-        sampled_nodes = np.random.choice(
-            unique_nodes, size=min(sample_size, len(unique_nodes)), replace=False
-        )
+        # Start with a random node and do BFS to get connected components
+        all_nodes = set(range(g.num_nodes))
+        sampled_nodes = set()
 
-        # Create node mapping
-        node_map = {int(node): idx for idx, node in enumerate(sampled_nodes)}
+        while len(sampled_nodes) < sample_size and all_nodes:
+            # Pick a random start node
+            start_node = np.random.choice(list(all_nodes - sampled_nodes))
+
+            # Do BFS
+            queue = [start_node]
+            component = set()
+
+            while queue and len(component) < sample_size - len(sampled_nodes):
+                current = queue.pop(0)
+                if current not in component:
+                    component.add(current)
+                    # Find neighbors
+                    mask = (edge_index[0] == current) | (edge_index[1] == current)
+                    neighbors = set(edge_index[0][mask]) | set(edge_index[1][mask])
+                    queue.extend(neighbors - component)
+
+            sampled_nodes.update(component)
+            if len(sampled_nodes) >= sample_size:
+                break
+
+        # Convert sampled nodes to list and create mapping
+        sampled_nodes = list(sampled_nodes)
+        node_map = {node: idx for idx, node in enumerate(sampled_nodes)}
 
         # Create nodes
-        nodes = [
-            {"id": idx, "group": int(labels[node])} for node, idx in node_map.items()
-        ]
+        for node in sampled_nodes:
+            nodes.append(
+                {
+                    "id": node_map[node],
+                    "group": int(labels[node]),
+                    "original_id": int(node),
+                }
+            )
 
-        # Create edges only between sampled nodes
-        edges = []
+        # Create edges
         for i in range(edge_index.shape[1]):
-            source = int(edge_index[0, i])
-            target = int(edge_index[1, i])
-
+            source, target = edge_index[0, i], edge_index[1, i]
             if source in node_map and target in node_map:
                 edges.append({"source": node_map[source], "target": node_map[target]})
-
-            if len(edges) >= sample_size * 2:
-                break
 
     return {"nodes": nodes, "edges": edges}
 
