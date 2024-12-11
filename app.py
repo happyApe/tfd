@@ -1,11 +1,6 @@
-# app.py
-import glob
 import json
 import os
-
-# Add parent directory to path to import from src
 import sys
-from datetime import datetime
 
 import dgl
 import networkx as nx
@@ -22,55 +17,42 @@ from elliptic_gnn.models import GAT, GCN, GIN
 
 app = Flask(__name__)
 
-
-def get_latest_model_path(base_path):
-    """Get the latest model path based on timestamp in directory name"""
-    dirs = glob.glob(os.path.join(base_path, "*"))
-    if not dirs:
-        return None
-    latest_dir = max(dirs, key=os.path.getctime)
-    return latest_dir
+# Global variables to store datasets and models
+elliptic_dataset = None
+ieee_cis_dataset = None
+models = {}
+graphs = {}
 
 
 def load_model_and_data():
-    models = {}
-    graphs = {}
+    global elliptic_dataset, ieee_cis_dataset, models, graphs
 
     # Load IEEE-CIS data and model
     try:
-        # Correct paths for IEEE-CIS
-        cis_data_dir = "src/cis_gnn/data/ieee_cis_clean/"  # Update this path
-        edge_files = glob.glob(os.path.join(cis_data_dir, "relation*"))
-        if edge_files:  # Only proceed if we found edge files
-            edge_files = [os.path.basename(f) for f in edge_files]
+        cis_data_dir = "src/cis_gnn/data/ieee_cis_clean/"
+        edge_files = [f for f in os.listdir(cis_data_dir) if f.startswith("relation")]
 
-            g, features, target_id_to_node, id_to_node = construct_graph(
-                cis_data_dir, edge_files, "features.csv", "TransactionID"
-            )
+        g, features, target_id_to_node, id_to_node = construct_graph(
+            cis_data_dir, edge_files, "features.csv", "TransactionID"
+        )
 
-            # Find latest model directory
-            cis_model_dir = get_latest_model_path("src/cis_gnn/model/")
-            if cis_model_dir and os.path.exists(
-                os.path.join(cis_model_dir, "model.pth")
-            ):
-                model_path = os.path.join(cis_model_dir, "model.pth")
-                model = HeteroRGCN(
-                    {ntype: g.number_of_nodes(ntype) for ntype in g.ntypes},
-                    g.etypes,
-                    features.shape[1],
-                    16,
-                    2,
-                    3,
-                    features.shape[1],
-                )
-                model.load_state_dict(torch.load(model_path))
-                models["ieee_cis"] = model
-                graphs["ieee_cis"] = g
+        # Store the graph and mappings
+        ieee_cis_dataset = {
+            "graph": g,
+            "features": features,
+            "target_id_to_node": target_id_to_node,
+            "id_to_node": id_to_node,
+        }
+        graphs["ieee_cis"] = g
+
     except Exception as e:
         print(f"Error loading IEEE-CIS data: {e}")
+        import traceback
 
+        traceback.print_exc()
+
+    # Load Elliptic data and models
     try:
-        # Load dataset
         elliptic_data_dir = "src/elliptic_gnn/data/elliptic_bitcoin_dataset/"
         elliptic_dataset = EllipticDataset(
             features_path=os.path.join(elliptic_data_dir, "elliptic_txs_features.csv"),
@@ -78,161 +60,161 @@ def load_model_and_data():
             classes_path=os.path.join(elliptic_data_dir, "elliptic_txs_classes.csv"),
         )
         data = elliptic_dataset.pyg_dataset()
-
-        # Load models from results directory
-        model_paths = {
-            "gat": "src/elliptic_gnn/results/gat_20241210_025231",
-            "gcn": "src/elliptic_gnn/results/gcn_20241210_025601",
-            "gin": "src/elliptic_gnn/results/gin_20241210_025836",
-        }
-
-        model_classes = {"gat": GAT, "gcn": GCN, "gin": GIN}
-
-        for model_name, result_dir in model_paths.items():
-            model_path = os.path.join(result_dir, f"{model_name}_model.pt")
-            if os.path.exists(model_path):
-                # Load the full checkpoint
-                checkpoint = torch.load(model_path)
-
-                # Initialize the model
-                model = model_classes[model_name](input_dim=data.num_features)
-
-                # Load just the model state dict
-                model.load_state_dict(checkpoint["model_state_dict"])
-                models[f"elliptic_{model_name}"] = model
-
         graphs["elliptic"] = data
+
     except Exception as e:
         print(f"Error loading Elliptic data: {e}")
         import traceback
 
-        traceback.print_exc()  # This will print the full error traceback
+        traceback.print_exc()
 
     return models, graphs
 
 
-def convert_graph_to_json(g, dataset_type, sample_size=1000):
+def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
     """Convert graph to JSON format for D3"""
     if dataset_type == "ieee_cis":
-        # IEEE-CIS: Focus on transactions and their connections
+        # Process IEEE-CIS heterogeneous graph
         nodes = []
         edges = []
         node_map = {}
         node_idx = 0
 
-        # Get all transaction nodes first
-        transaction_type = (
-            "target"  # This is how transactions are labeled in the HeteroRGCN
-        )
-        n_transactions = g.number_of_nodes(transaction_type)
-        sampled_transactions = np.random.choice(
-            n_transactions, size=min(sample_size // 2, n_transactions), replace=False
-        )
+        # First add transaction nodes (they have features)
+        transaction_type = "target"
+        tx_nodes = g.nodes[transaction_type].data["features"]
+        n_transactions = min(sample_size // 2, tx_nodes.shape[0])
+        sampled_tx = np.random.choice(tx_nodes.shape[0], n_transactions, replace=False)
 
         # Add transaction nodes
-        for idx in sampled_transactions:
+        for idx in sampled_tx:
             node_map[f"{transaction_type}_{idx}"] = node_idx
-            nodes.append({"id": node_idx, "type": "Transaction", "group": 0})
+            nodes.append(
+                {
+                    "id": node_idx,
+                    "type": "Transaction",
+                    "group": 0,
+                    "color": "#1f77b4",  # blue for transactions
+                }
+            )
             node_idx += 1
 
-        # Add connected nodes from other types
+        # Add connected entity nodes
+        entity_colors = {
+            "card": "#2ca02c",  # green
+            "addr": "#d62728",  # red
+            "email": "#9467bd",  # purple
+            "id": "#8c564b",  # brown
+            "device": "#e377c2",  # pink
+        }
+
         for etype in g.canonical_etypes:
             src, rel, dst = etype
             if src == transaction_type or dst == transaction_type:
                 u, v = g.edges(etype=rel)
-                u = u.cpu().numpy()
-                v = v.cpu().numpy()
-
                 for i in range(len(u)):
-                    if f"{src}_{u[i]}" in node_map or f"{dst}_{v[i]}" in node_map:
-                        # Add source node if not exists
-                        if f"{src}_{u[i]}" not in node_map:
-                            node_map[f"{src}_{u[i]}"] = node_idx
-                            nodes.append(
-                                {
-                                    "id": node_idx,
-                                    "type": src,
-                                    "group": g.ntypes.index(src),
-                                }
-                            )
-                            node_idx += 1
+                    src_node = f"{src}_{u[i].item()}"
+                    dst_node = f"{dst}_{v[i].item()}"
 
-                        # Add target node if not exists
-                        if f"{dst}_{v[i]}" not in node_map:
-                            node_map[f"{dst}_{v[i]}"] = node_idx
-                            nodes.append(
-                                {
-                                    "id": node_idx,
-                                    "type": dst,
-                                    "group": g.ntypes.index(dst),
-                                }
-                            )
-                            node_idx += 1
-
-                        # Add edge
-                        edges.append(
+                    # Add source node if not exists
+                    if src_node not in node_map:
+                        node_map[src_node] = node_idx
+                        color = next(
+                            (c for k, c in entity_colors.items() if k in src), "#aec7e8"
+                        )
+                        nodes.append(
                             {
-                                "source": node_map[f"{src}_{u[i]}"],
-                                "target": node_map[f"{dst}_{v[i]}"],
-                                "type": rel,
+                                "id": node_idx,
+                                "type": src,
+                                "group": len(nodes) % 5 + 1,
+                                "color": color,
                             }
                         )
+                        node_idx += 1
+
+                    # Add target node if not exists
+                    if dst_node not in node_map:
+                        node_map[dst_node] = node_idx
+                        color = next(
+                            (c for k, c in entity_colors.items() if k in dst), "#aec7e8"
+                        )
+                        nodes.append(
+                            {
+                                "id": node_idx,
+                                "type": dst,
+                                "group": len(nodes) % 5 + 1,
+                                "color": color,
+                            }
+                        )
+                        node_idx += 1
+
+                    # Add edge
+                    edges.append(
+                        {
+                            "source": node_map[src_node],
+                            "target": node_map[dst_node],
+                            "type": rel,
+                        }
+                    )
+
+                    if len(edges) >= sample_size:
+                        break
 
     else:  # Elliptic dataset
-        nodes = []
-        edges = []
-        node_map = {}
+        if not hasattr(g, "merged_df"):
+            return {"nodes": [], "edges": []}
 
-        # Get edge index and convert to numpy for easier handling
-        edge_index = g.edge_index.cpu().numpy()
-        labels = g.y.cpu().numpy()
-
-        # Start with a random node and do BFS to get connected components
-        all_nodes = set(range(g.num_nodes))
-        sampled_nodes = set()
-
-        while len(sampled_nodes) < sample_size and all_nodes:
-            # Pick a random start node
-            start_node = np.random.choice(list(all_nodes - sampled_nodes))
-
-            # Do BFS
-            queue = [start_node]
-            component = set()
-
-            while queue and len(component) < sample_size - len(sampled_nodes):
-                current = queue.pop(0)
-                if current not in component:
-                    component.add(current)
-                    # Find neighbors
-                    mask = (edge_index[0] == current) | (edge_index[1] == current)
-                    neighbors = set(edge_index[0][mask]) | set(edge_index[1][mask])
-                    queue.extend(neighbors - component)
-
-            sampled_nodes.update(component)
-            if len(sampled_nodes) >= sample_size:
-                break
-
-        # Convert sampled nodes to list and create mapping
-        sampled_nodes = list(sampled_nodes)
-        node_map = {node: idx for idx, node in enumerate(sampled_nodes)}
+        # Get nodes for the specific time step
+        node_list = g.merged_df.index[g.merged_df.loc[:, 1] == time_step].tolist()
 
         # Create nodes
-        for node in sampled_nodes:
+        nodes = []
+        node_map = {}
+
+        for idx, node_id in enumerate(node_list):
+            node_map[node_id] = idx
+
+            if node_id in g.illicit_ids:
+                color = "#d62728"  # red for fraud
+                group = 1
+            elif node_id in g.licit_ids:
+                color = "#2ca02c"  # green for legitimate
+                group = 0
+            else:
+                color = "#1f77b4"  # blue for unknown
+                group = 2
+
             nodes.append(
                 {
-                    "id": node_map[node],
-                    "group": int(labels[node]),
-                    "original_id": int(node),
+                    "id": idx,
+                    "original_id": int(node_id),
+                    "group": group,
+                    "color": color,
+                    "type": "Transaction",
                 }
             )
 
         # Create edges
-        for i in range(edge_index.shape[1]):
-            source, target = edge_index[0, i], edge_index[1, i]
+        edges = []
+        edge_index = g.edge_index.cpu().numpy()
+
+        for row in edge_index.T:
+            source, target = row[0], row[1]
             if source in node_map and target in node_map:
                 edges.append({"source": node_map[source], "target": node_map[target]})
 
-    return {"nodes": nodes, "edges": edges}
+            if len(edges) >= sample_size:
+                break
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "stats": {
+            "nodeCount": len(nodes),
+            "edgeCount": len(edges),
+            "nodeTypes": list(set(n["type"] for n in nodes)),
+        },
+    }
 
 
 @app.route("/")
@@ -244,7 +226,14 @@ def index():
 def get_graph(dataset):
     try:
         if dataset in graphs:
-            graph_data = convert_graph_to_json(graphs[dataset], dataset)
+            sample_size = 200 if dataset == "ieee_cis" else 500
+            time_step = 30  # Default time step for Elliptic dataset
+            graph_data = convert_graph_to_json(
+                elliptic_dataset if dataset == "elliptic" else graphs[dataset],
+                dataset,
+                time_step=time_step,
+                sample_size=sample_size,
+            )
             return jsonify(graph_data)
         return jsonify({"error": "Dataset not found"}), 404
     except Exception as e:
@@ -256,9 +245,9 @@ def get_graph(dataset):
 
 
 if __name__ == "__main__":
-    # Load models and graphs globally
     print("Loading models and graphs...")
-    models, graphs = load_model_and_data()
-    print("Loaded models:", list(models.keys()))
-    print("Loaded graphs:", list(graphs.keys()))
-    app.run(debug=False)
+    if not os.environ.get("WERKZEUG_RUN_MAIN"):
+        models, graphs = load_model_and_data()
+        print("Loaded models:", list(models.keys()))
+        print("Loaded graphs:", list(graphs.keys()))
+    app.run(debug=False, host="0.0.0.0")

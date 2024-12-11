@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Fraud Detection Graph Visualization</title>
+    <title>Fraud Detection Network Visualization</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
     <style>
         body {
@@ -21,12 +21,15 @@
             z-index: 1000;
             max-height: 90vh;
             overflow-y: auto;
+            width: 280px;
         }
 
         .controls h3 {
             margin-top: 0;
             margin-bottom: 15px;
             color: #2c3e50;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
         }
 
         select {
@@ -38,30 +41,17 @@
             background-color: white;
         }
 
-        #legend {
-            margin-top: 15px;
-            font-size: 12px;
-        }
-
-        .legend-item {
-            display: flex;
-            align-items: center;
-            margin-bottom: 5px;
-        }
-
-        .legend-color {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            margin-right: 8px;
-            display: inline-block;
+        #graph {
+            width: 100vw;
+            height: 100vh;
+            background-color: #ffffff;
         }
 
         .node {
             stroke: #fff;
             stroke-width: 1.5px;
             cursor: pointer;
-            transition: r 0.2s ease;
+            transition: all 0.2s ease;
         }
 
         .node:hover {
@@ -71,68 +61,142 @@
         .link {
             stroke: #999;
             stroke-opacity: 0.6;
-            stroke-width: 1px;
-        }
-
-        #graph {
-            width: 100vw;
-            height: 100vh;
-            background-color: #ffffff;
+            stroke-width: 0.5px;
         }
 
         .tooltip {
             position: absolute;
-            padding: 8px;
+            padding: 10px;
             background: rgba(0, 0, 0, 0.8);
             color: white;
             border-radius: 4px;
             font-size: 12px;
             pointer-events: none;
-            z-index: 1000;
+            z-index: 1100;
+            max-width: 200px;
         }
 
         .stats {
-            margin-top: 15px;
-            padding-top: 15px;
-            border-top: 1px solid #ddd;
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 15px 0;
+            font-size: 13px;
         }
 
         .stats p {
             margin: 5px 0;
+            color: #666;
+        }
+
+        .legend {
+            margin-top: 15px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
             font-size: 12px;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+            border: 1px solid rgba(0,0,0,0.1);
+        }
+
+        .controls-section {
+            margin: 15px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+
+        .control-label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 12px;
+            color: #666;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            margin: 10px 0;
+        }
+
+        .button {
+            background: #4a90e2;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            width: 100%;
+            margin: 5px 0;
+        }
+
+        .button:hover {
+            background: #357abd;
         }
     </style>
 </head>
 <body>
     <div class="tooltip" style="display: none;"></div>
     <div class="controls">
-        <h3>Graph Visualization</h3>
+        <h3>Network Visualization</h3>
+        
         <select id="dataset-select">
-            <option value="ieee_cis">IEEE-CIS Dataset</option>
-            <option value="elliptic">Elliptic Dataset</option>
+            <option value="ieee_cis">IEEE-CIS Fraud Detection</option>
+            <option value="elliptic">Elliptic Bitcoin Network</option>
         </select>
-        
-        <div id="legend"></div>
-        
+
         <div class="stats">
-            <p id="nodes-count"></p>
-            <p id="edges-count"></p>
+            <p id="nodes-count">Nodes: 0</p>
+            <p id="edges-count">Edges: 0</p>
+            <p id="dataset-info"></p>
         </div>
+
+        <div class="controls-section">
+            <div class="control-group">
+                <label class="control-label">Node Spacing</label>
+                <input type="range" id="charge-strength" min="-200" max="-10" value="-50">
+            </div>
+
+            <div class="control-group">
+                <label class="control-label">Link Distance</label>
+                <input type="range" id="link-distance" min="10" max="100" value="30">
+            </div>
+
+            <div class="control-group">
+                <label class="control-label">Node Size</label>
+                <input type="range" id="node-size" min="2" max="10" value="5">
+            </div>
+        </div>
+
+        <button class="button" id="reset-zoom">Reset View</button>
+        <div id="legend" class="legend"></div>
     </div>
+
     <div id="graph"></div>
 
     <script>
         const width = window.innerWidth;
         const height = window.innerHeight;
-        const color = d3.scaleOrdinal(d3.schemeCategory10);
-        const tooltip = d3.select(".tooltip");
+        let currentDataset = 'ieee_cis';
         
-        // Initialize SVG
+        // Initialize SVG and container
         const svg = d3.select("#graph")
             .append("svg")
             .attr("width", width)
             .attr("height", height);
-        
+            
         // Add zoom behavior
         const zoom = d3.zoom()
             .scaleExtent([0.1, 4])
@@ -147,67 +211,24 @@
         
         // Initialize force simulation
         let simulation = d3.forceSimulation()
-            .force("link", d3.forceLink().id(d => d.id).distance(30).strength(1))
-            .force("charge", d3.forceManyBody().strength(-50).distanceMax(150))
+            .force("link", d3.forceLink().id(d => d.id).distance(30))
+            .force("charge", d3.forceManyBody().strength(-50))
             .force("center", d3.forceCenter(width / 2, height / 2))
-            .force("collide", d3.forceCollide(10));
-
-        function updateLegend(dataset, nodeTypes) {
-            const legendDiv = d3.select("#legend");
-            legendDiv.html("<h4>Node Types</h4>");
-            
-            if (dataset === "ieee_cis") {
-                nodeTypes.forEach((type, i) => {
-                    const div = legendDiv.append("div")
-                        .attr("class", "legend-item");
-                    
-                    div.append("div")
-                        .attr("class", "legend-color")
-                        .style("background-color", color(i));
-                    
-                    div.append("span")
-                        .text(type);
-                });
-            } else {
-                const types = [
-                    {name: "Legitimate", color: color(0)},
-                    {name: "Fraudulent", color: color(1)}
-                ];
-                
-                types.forEach(type => {
-                    const div = legendDiv.append("div")
-                        .attr("class", "legend-item");
-                    
-                    div.append("div")
-                        .attr("class", "legend-color")
-                        .style("background-color", type.color);
-                    
-                    div.append("span")
-                        .text(type.name);
-                });
-            }
-        }
-
-        function updateStats(nodes, edges) {
-            d3.select("#nodes-count").text(`Nodes: ${nodes.length}`);
-            d3.select("#edges-count").text(`Edges: ${edges.length}`);
-        }
+            .force("collide", d3.forceCollide(8));
 
         function updateGraph(dataset) {
+            currentDataset = dataset;
+            
             // Clear previous graph
             g.selectAll("*").remove();
             
-            // Reset zoom
-            svg.transition().duration(750).call(
-                zoom.transform,
-                d3.zoomIdentity
-            );
-
             d3.json(`/api/graph/${dataset}`).then(function(graph) {
                 // Update statistics
-                updateStats(graph.nodes, graph.edges);
-                
-                // Create arrow marker
+                d3.select("#nodes-count").text(`Nodes: ${graph.stats.nodeCount}`);
+                d3.select("#edges-count").text(`Edges: ${graph.stats.edgeCount}`);
+                d3.select("#dataset-info").text(`Dataset: ${dataset.toUpperCase()}`);
+
+                // Create arrow marker for directed edges
                 g.append("defs").append("marker")
                     .attr("id", "arrowhead")
                     .attr("viewBox", "-0 -5 10 10")
@@ -216,7 +237,7 @@
                     .attr("orient", "auto")
                     .attr("markerWidth", 6)
                     .attr("markerHeight", 6)
-                    .append("svg:path")
+                    .append("path")
                     .attr("d", "M 0,-5 L 10 ,0 L 0,5")
                     .attr("fill", "#999");
 
@@ -234,8 +255,8 @@
                     .data(graph.nodes)
                     .enter().append("circle")
                     .attr("class", "node")
-                    .attr("r", 5)
-                    .attr("fill", d => color(d.group))
+                    .attr("r", d3.select("#node-size").property("value"))
+                    .attr("fill", d => d.color)
                     .call(d3.drag()
                         .on("start", dragstarted)
                         .on("drag", dragged)
@@ -243,59 +264,90 @@
 
                 // Node hover effects
                 node.on("mouseover", function(event, d) {
+                    // Highlight node
                     d3.select(this)
                         .transition()
                         .duration(200)
-                        .attr("r", 8);
+                        .attr("r", +d3.select("#node-size").property("value") * 1.5);
 
+                    // Show tooltip
                     tooltip.style("display", "block")
-                        .html(`Type: ${d.type || (d.group ? 'Fraudulent' : 'Legitimate')}
-                            ${d.original_id ? '<br>ID: ' + d.original_id : ''}`)
+                        .html(`Type: ${d.type}<br>
+                              ${d.original_id ? `ID: ${d.original_id}<br>` : ''}
+                              ${d.group !== undefined ? `Group: ${d.group}` : ''}`)
                         .style("left", (event.pageX + 10) + "px")
                         .style("top", (event.pageY - 10) + "px");
+
+                    // Highlight connected links and nodes
+                    link.style("stroke", l => 
+                        (l.source.id === d.id || l.target.id === d.id) ? "#666" : "#999")
+                        .style("stroke-opacity", l => 
+                            (l.source.id === d.id || l.target.id === d.id) ? 1 : 0.6);
                 })
                 .on("mouseout", function() {
+                    // Reset node size
                     d3.select(this)
                         .transition()
                         .duration(200)
-                        .attr("r", 5);
-                    
+                        .attr("r", d3.select("#node-size").property("value"));
+
+                    // Hide tooltip
                     tooltip.style("display", "none");
-                })
-                .on("mousemove", function(event) {
-                    tooltip
-                        .style("left", (event.pageX + 10) + "px")
-                        .style("top", (event.pageY - 10) + "px");
+
+                    // Reset links
+                    link.style("stroke", "#999")
+                        .style("stroke-opacity", 0.6);
                 });
 
-                // Update force simulation
-                simulation.nodes(graph.nodes)
-                    .on("tick", ticked);
+                // Update simulation
+                simulation
+                    .nodes(graph.nodes)
+                    .on("tick", () => {
+                        link
+                            .attr("x1", d => d.source.x)
+                            .attr("y1", d => d.source.y)
+                            .attr("x2", d => d.target.x)
+                            .attr("y2", d => d.target.y);
+
+                        node
+                            .attr("cx", d => d.x)
+                            .attr("cy", d => d.y);
+                    });
 
                 simulation.force("link")
                     .links(graph.edges);
 
-                // Reset simulation
+                // Reset and restart simulation
                 simulation.alpha(1).restart();
 
                 // Update legend
-                const nodeTypes = Array.from(new Set(graph.nodes.map(n => n.type)));
-                updateLegend(dataset, nodeTypes);
-
-                function ticked() {
-                    link
-                        .attr("x1", d => d.source.x)
-                        .attr("y1", d => d.source.y)
-                        .attr("x2", d => d.target.x)
-                        .attr("y2", d => d.target.y);
-
-                    node
-                        .attr("cx", d => d.x)
-                        .attr("cy", d => d.y);
-                }
+                updateLegend(graph.nodes);
             });
         }
 
+        function updateLegend(nodes) {
+            const legendDiv = d3.select("#legend");
+            legendDiv.html("<h4 style='margin-top:0;font-size:13px;'>Node Types</h4>");
+
+            const types = Array.from(new Set(nodes.map(n => ({
+                type: n.type,
+                color: n.color
+            })).map(JSON.stringify))).map(JSON.parse);
+
+            types.forEach(type => {
+                const div = legendDiv.append("div")
+                    .attr("class", "legend-item");
+                
+                div.append("div")
+                    .attr("class", "legend-color")
+                    .style("background-color", type.color);
+                
+                div.append("span")
+                    .text(type.type);
+            });
+        }
+
+        // Event handlers
         function dragstarted(event) {
             if (!event.active) simulation.alphaTarget(0.3).restart();
             event.subject.fx = event.subject.x;
@@ -313,27 +365,47 @@
             event.subject.fy = null;
         }
 
-        // Dataset selection handler
+        // Control handlers
+        d3.select("#charge-strength").on("input", function() {
+            simulation.force("charge").strength(+this.value);
+            simulation.alpha(1).restart();
+        });
+
+        d3.select("#link-distance").on("input", function() {
+            simulation.force("link").distance(+this.value);
+            simulation.alpha(1).restart();
+        });
+
+        d3.select("#node-size").on("input", function() {
+            g.selectAll(".node").attr("r", +this.value);
+        });
+
+        d3.select("#reset-zoom").on("click", function() {
+            svg.transition().duration(750).call(
+                zoom.transform,
+                d3.zoomIdentity
+            );
+        });
+
         d3.select("#dataset-select").on("change", function() {
             updateGraph(this.value);
         });
 
-        // Initial load
-        updateGraph("ieee_cis");
-
         // Handle window resize
         window.addEventListener("resize", () => {
-            svg
-                .attr("width", window.innerWidth)
-                .attr("height", window.innerHeight);
+            const width = window.innerWidth;
+            const height = window.innerHeight;
             
-            simulation.force("center", d3.forceCenter(
-                window.innerWidth / 2, 
-                window.innerHeight / 2
-            ));
+            svg.attr("width", width)
+               .attr("height", height);
             
+            simulation.force("center", d3.forceCenter(width / 2, height / 2));
             simulation.alpha(1).restart();
         });
+
+        // Initialize
+        const tooltip = d3.select(".tooltip");
+        updateGraph("ieee_cis");
     </script>
 </body>
 </html>
