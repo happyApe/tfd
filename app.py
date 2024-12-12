@@ -2,6 +2,7 @@ import glob
 import json
 import os
 import sys
+import traceback
 
 import dgl
 import networkx as nx
@@ -243,17 +244,32 @@ def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
             data = graphs["elliptic"].to(device)
             with torch.no_grad():
                 try:
-                    pred_scores, predictions = model(
-                        data.x, data.edge_index
-                    )  # Use model directly
-                    predictions = (
-                        (pred_scores > 0.5).cpu().numpy()
-                    )  # Convert to binary predictions
+                    # Convert input data to appropriate format
+                    x = data.x.to(device)
+                    edge_index = data.edge_index.to(device)
+
+                    # Get model predictions
+                    output = model(x, edge_index)
+                    if isinstance(output, tuple):
+                        pred_scores = output[0]
+                    else:
+                        pred_scores = output
+
+                    # Convert to probabilities and then binary predictions
+                    pred_probs = torch.sigmoid(pred_scores)
+                    predictions = (pred_probs > 0.5).cpu().numpy().flatten()
+
+                    print(f"Predictions shape: {predictions.shape}")
+                    print(f"Number of fraud predictions: {np.sum(predictions == 1)}")
+
                 except Exception as e:
                     print(f"Error getting predictions: {e}")
+                    traceback.print_exc()
                     predictions = None
+
         # Get nodes for the specific time step
         node_list = g.merged_df.index[g.merged_df.loc[:, 1] == time_step].tolist()
+        print(f"Total nodes for time step {time_step}: {len(node_list)}")
 
         # Create nodes with true labels and predictions
         nodes = []
@@ -261,6 +277,8 @@ def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
 
         for idx, node_id in enumerate(node_list):
             node_map[node_id] = idx
+
+            # Get prediction for this node if available
             pred = predictions[node_id] if predictions is not None else None
 
             # Set true color based on actual label
@@ -274,10 +292,13 @@ def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
                 true_color = "#1f77b4"  # Blue for unknown
                 group = 2
 
-            # Set predicted color
-            pred_color = (
-                "#d62728" if pred == 1 else "#2ca02c" if pred == 0 else "#1f77b4"
-            )
+            # Set predicted color based on model prediction
+            if pred is not None:
+                pred_color = (
+                    "#d62728" if pred else "#2ca02c"
+                )  # Red for fraud, green for legitimate
+            else:
+                pred_color = true_color
 
             nodes.append(
                 {
@@ -288,9 +309,12 @@ def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
                     "pred_color": pred_color,
                     "type": "Transaction",
                     "predicted": bool(pred) if pred is not None else None,
+                    "is_fraud": group == 1,  # Add true label information
+                    "predicted_fraud": (
+                        bool(pred) if pred is not None else None
+                    ),  # Add prediction information
                 }
             )
-
         # Create edges
         edges = []
         edge_index = g.edge_index.cpu().numpy()
@@ -333,6 +357,18 @@ def get_graph(dataset):
                 time_step=time_step,
                 sample_size=sample_size,
             )
+
+            # Add debugging information
+            if dataset == "elliptic":
+                fraud_count = sum(
+                    1 for node in graph_data["nodes"] if node.get("predicted_fraud")
+                )
+                true_fraud_count = sum(
+                    1 for node in graph_data["nodes"] if node.get("is_fraud")
+                )
+                print(f"Number of predicted fraud cases: {fraud_count}")
+                print(f"Number of true fraud cases: {true_fraud_count}")
+
             return jsonify(graph_data)
         return jsonify({"error": "Dataset not found"}), 404
     except Exception as e:
