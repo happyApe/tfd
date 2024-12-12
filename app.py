@@ -241,23 +241,12 @@ def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
         predictions = None
         if "elliptic_gat" in models:
             model = models["elliptic_gat"]
-            data = graphs["elliptic"].to(device)
+            data = graphs["elliptic"].to(device)  # This is the PyG data object
             with torch.no_grad():
                 try:
-                    # Convert input data to appropriate format
-                    x = data.x.to(device)
-                    edge_index = data.edge_index.to(device)
-
-                    # Get model predictions
-                    output = model(x, edge_index)
-                    if isinstance(output, tuple):
-                        pred_scores = output[0]
-                    else:
-                        pred_scores = output
-
-                    # Convert to probabilities and then binary predictions
-                    pred_probs = torch.sigmoid(pred_scores)
-                    predictions = (pred_probs > 0.5).cpu().numpy().flatten()
+                    # Pass the entire data object to the model
+                    pred_scores = model(data)
+                    predictions = (pred_scores > 0.5).cpu().numpy().flatten()
 
                     print(f"Predictions shape: {predictions.shape}")
                     print(f"Number of fraud predictions: {np.sum(predictions == 1)}")
@@ -286,7 +275,7 @@ def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
                 true_color = "#d62728"  # Red for true fraud
                 group = 1
             elif node_id in g.licit_ids:
-                true_color = "#2ca02c"  # Green for true legitimate
+                true_color = "#2ca02c"  # Green for legitimate
                 group = 0
             else:
                 true_color = "#1f77b4"  # Blue for unknown
@@ -309,12 +298,11 @@ def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
                     "pred_color": pred_color,
                     "type": "Transaction",
                     "predicted": bool(pred) if pred is not None else None,
-                    "is_fraud": group == 1,  # Add true label information
-                    "predicted_fraud": (
-                        bool(pred) if pred is not None else None
-                    ),  # Add prediction information
+                    "is_fraud": group == 1,
+                    "predicted_fraud": bool(pred) if pred is not None else None,
                 }
             )
+
         # Create edges
         edges = []
         edge_index = g.edge_index.cpu().numpy()
