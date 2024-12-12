@@ -23,10 +23,11 @@ elliptic_dataset = None
 ieee_cis_dataset = None
 models = {}
 graphs = {}
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def load_model_and_data():
-    global elliptic_dataset, ieee_cis_dataset, models, graphs
+    global elliptic_dataset, ieee_cis_dataset, models, graphs, device
 
     # Load IEEE-CIS data and model
     try:
@@ -89,7 +90,8 @@ def load_model_and_data():
         for model_name, model_path in model_paths.items():
             if os.path.exists(model_path):
                 model = model_classes[model_name](input_dim=data.num_features)
-                checkpoint = torch.load(model_path)
+                model = model.to(device)
+                checkpoint = torch.load(model_path, map_location=device)
                 model.load_state_dict(checkpoint["model_state_dict"])
                 model.eval()
                 models[f"elliptic_{model_name}"] = model
@@ -238,11 +240,18 @@ def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
         predictions = None
         if "elliptic_gat" in models:
             model = models["elliptic_gat"]
-            data = graphs["elliptic"].to(model.device)
+            data = graphs["elliptic"].to(device)
             with torch.no_grad():
-                pred_scores, predictions = model.test(data, labeled_only=True)
-                predictions = predictions.cpu().numpy()
-
+                try:
+                    pred_scores, predictions = model(
+                        data.x, data.edge_index
+                    )  # Use model directly
+                    predictions = (
+                        (pred_scores > 0.5).cpu().numpy()
+                    )  # Convert to binary predictions
+                except Exception as e:
+                    print(f"Error getting predictions: {e}")
+                    predictions = None
         # Get nodes for the specific time step
         node_list = g.merged_df.index[g.merged_df.loc[:, 1] == time_step].tolist()
 
