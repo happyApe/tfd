@@ -91,6 +91,7 @@ def load_model_and_data():
         for model_name, model_path in model_paths.items():
             if os.path.exists(model_path):
                 model = model_classes[model_name](input_dim=data.num_features)
+                model = model.float()
                 model = model.to(device)
                 checkpoint = torch.load(model_path, map_location=device)
                 model.load_state_dict(checkpoint["model_state_dict"])
@@ -241,10 +242,19 @@ def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
         predictions = None
         if "elliptic_gat" in models:
             model = models["elliptic_gat"]
-            data = graphs["elliptic"].to(device)  # This is the PyG data object
+            data = graphs["elliptic"].to(device)
+
             with torch.no_grad():
                 try:
-                    # Pass the entire data object to the model
+                    # Convert data to float32 to match model parameters
+                    data.x = data.x.float()  # Convert from double to float
+                    data.edge_index = data.edge_index.long()  # Ensure indices are long
+
+                    # Move data to device
+                    data.x = data.x.to(device)
+                    data.edge_index = data.edge_index.to(device)
+
+                    # Get predictions
                     pred_scores = model(data)
                     predictions = (pred_scores > 0.5).cpu().numpy().flatten()
 
@@ -255,7 +265,6 @@ def convert_graph_to_json(g, dataset_type, time_step=30, sample_size=1000):
                     print(f"Error getting predictions: {e}")
                     traceback.print_exc()
                     predictions = None
-
         # Get nodes for the specific time step
         node_list = g.merged_df.index[g.merged_df.loc[:, 1] == time_step].tolist()
         print(f"Total nodes for time step {time_step}: {len(node_list)}")
